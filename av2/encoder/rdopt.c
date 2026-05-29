@@ -5354,190 +5354,396 @@ static int64_t handle_inter_mode(
 
     for (int precision_dx = precision_def->num_precisions - 1;
          precision_dx >= 0; precision_dx--) {
-      for (int scale_index = 0; scale_index < jmvd_scaling_factor_num;
-           ++scale_index) {
-        mbmi->jmvd_scale_mode = scale_index;
-        if (is_joint_amvd_coding_mode(mbmi->mode, mbmi->use_amvd)) {
-          if (scale_index > JOINT_AMVD_SCALE_FACTOR_CNT - 1) continue;
+      MvSubpelPrecision pb_mv_precision =
+          precision_def->precision[precision_dx];
+      mbmi->pb_mv_precision = pb_mv_precision;
+      if (!is_pb_mv_prec_active &&
+          (pb_mv_precision != mbmi->max_mv_precision)) {
+        continue;
+      }
+      assert(pb_mv_precision <= mbmi->max_mv_precision);
+
+      if (!is_comp_pred) {
+        if (skip_eval_mode[0]) continue;
+
+        mbmi->mode = this_mode;
+        mbmi->refinemv_flag = 0;
+        mbmi->cwp_idx = CWP_EQUAL;
+        mbmi->jmvd_scale_mode = 0;
+
+        // Initialize compound mode data
+        mbmi->interinter_comp.type = COMPOUND_AVERAGE;
+        mbmi->comp_group_idx = 0;
+        if (mbmi->ref_frame[1] == INTRA_FRAME) mbmi->ref_frame[1] = NONE_FRAME;
+        mbmi->num_proj_ref[0] = mbmi->num_proj_ref[1] = 0;
+        mbmi->motion_mode = SIMPLE_TRANSLATION;
+        mbmi->ref_mv_idx[1] = ref_mv_idx[1];
+        mbmi->ref_mv_idx[0] = ref_mv_idx[0];
+        ref_mv_idx_type = av2_ref_mv_idx_type(mbmi, ref_mv_idx);
+
+        const int prediction_mode_cost =
+            cost_prediction_mode(mode_costs, this_mode, cm, mbmi, xd, mode_ctx);
+        const int base_rate = args->ref_frame_cost + args->single_comp_cost +
+                              prediction_mode_cost;
+        const int drl_cost =
+            get_drl_cost(cm->features.max_drl_bits, mbmi, mbmi_ext, x);
+        const int jmvd_scale_mode_cost =
+            get_jmvd_scale_mode_cost(mbmi, mode_costs);
+        const int rate_so_far = base_rate + drl_cost +
+                                flex_mv_cost[mbmi->pb_mv_precision] +
+                                jmvd_scale_mode_cost;
+        if (cpi->sf.inter_sf.skip_mode_eval_based_on_rate_cost &&
+            ref_best_rd != INT64_MAX &&
+            RDCOST(x->rdmult, rate_so_far, 0) > ref_best_rd) {
+          continue;
         }
-        if (cpi->sf.inter_sf.early_terminate_jmvd_scale_factor) {
-          if (scale_index > 0 && best_rd > 1.5 * ref_best_rd &&
-              (!is_inter_compound_mode(best_ref_mode)))
+
+        if (is_pb_mv_prec_active) {
+          if (cpi->sf.flexmv_sf.terminate_early_4_pel_precision &&
+              pb_mv_precision < MV_PRECISION_FOUR_PEL &&
+              best_precision_so_far[0] >= MV_PRECISION_QTR_PEL)
             continue;
-        }
-        // apply early termination method to jmvd scaling factors
-        if (cpi->sf.inter_sf.early_terminate_jmvd_scale_factor) {
-          if (scale_index > 0 && (ref_mv_idx[0] > 0 || ref_mv_idx[1] > 0) &&
-              best_mbmi.jmvd_scale_mode == 0 &&
-              (best_mbmi.ref_mv_idx[0] < ref_mv_idx[0] ||
-               best_mbmi.ref_mv_idx[1] < ref_mv_idx[1]))
+          if (prune_curr_mv_precision_eval(
+                  cpi->sf.flexmv_sf.prune_mv_prec_using_best_mv_prec_so_far,
+                  precision_dx, best_precision_dx_so_far[0]))
             continue;
-        }
-
-        cwp_loop_num = cm->features.enable_cwp ? MAX_CWP_NUM : 1;
-        if (best_cwp_idxs[scale_index] == CWP_EQUAL &&
-            (ref_mv_idx[0] > 0 || ref_mv_idx[1] > 0))
-          cwp_loop_num = 1;
-
-        for (int cwp_search_idx = 0; cwp_search_idx < cwp_loop_num;
-             cwp_search_idx++) {
-          mbmi->cwp_idx = cwp_weighting_factor[same_side][cwp_search_idx];
-
-          if (mbmi->cwp_idx != CWP_EQUAL) {
-            if (!is_cwp_allowed(mbmi)) break;
-            if (cwp_search_mask[cwp_search_idx] == 0) {
+          if (mbmi->ref_mv_idx[0] || mbmi->ref_mv_idx[1]) {
+            if (cpi->sf.flexmv_sf.do_not_search_8_pel_precision &&
+                mbmi->pb_mv_precision == MV_PRECISION_8_PEL)
               continue;
-            }
+
+            if (cpi->sf.flexmv_sf.do_not_search_4_pel_precision &&
+                mbmi->pb_mv_precision == MV_PRECISION_FOUR_PEL)
+              continue;
           }
-          if (mbmi->cwp_idx == -1) {
-            break;
-          }
-          MvSubpelPrecision pb_mv_precision =
-              precision_def->precision[precision_dx];
-          mbmi->pb_mv_precision = pb_mv_precision;
-          if (!is_pb_mv_prec_active &&
-              (pb_mv_precision != mbmi->max_mv_precision)) {
+        }
+
+        int_mv cur_mv[2];
+        if (mbmi->mode != WARPMV &&
+            !build_cur_mv(cur_mv, this_mode, cm, x,
+                          cpi->sf.inter_sf.skip_repeated_ref_mv)) {
+          continue;
+        }
+        if (mbmi->mode == WARPMV) {
+          cur_mv[0].as_int = 0;
+          cur_mv[1].as_int = 0;
+          assert(ref_mv_idx[0] == 0 && ref_mv_idx[1] == 0);
+        }
+
+        if (mbmi->mode != WARPMV && cpi->sf.flexmv_sf.skip_similar_ref_mv &&
+            skip_similar_ref_mv(cpi, x, bsize)) {
+          continue;
+        }
+
+        assert(IMPLIES(mbmi->mode == WARPMV,
+                       mbmi->pb_mv_precision == mbmi->max_mv_precision));
+
+        int_mv bawp_off_mv[2];
+        int64_t bawp_off_newmv_ret_val = 0;
+        int bawp_off_rate_mv = 0;
+        for (i = 0; i < 1; ++i) {
+          bawp_off_mv[i].as_int = cur_mv[i].as_int;
+        }
+
+        int bawp_eanbled = cm->features.enable_bawp && !mbmi->refinemv_flag &&
+                           av2_allow_bawp(cm, mbmi, xd->mi_row, xd->mi_col);
+        if (bawp_eanbled && av2_allow_explicit_bawp(mbmi))
+          bawp_eanbled += EXPLICIT_BAWP_SCALE_CNT;
+
+        const int total_bawp_iters =
+            (bawp_eanbled == 0) ? 1 : (1 + 2 * bawp_eanbled);
+        for (int b_idx = 0; b_idx < total_bawp_iters; b_idx++) {
+          int bawp_flag = (b_idx + 1) / 2;
+          int bawp_flag_uv = (b_idx == 0) ? 0 : ((b_idx + 1) % 2);
+
+          if (mbmi->ref_mv_idx[0] > 0 && bawp_flag > 1 &&
+              best_mbmi.bawp_flag[0] == 0)
+            continue;
+
+          if (bawp_flag_uv &&
+              (!xd->is_chroma_ref || cm->seq_params.monochrome)) {
             continue;
           }
-          assert(pb_mv_precision <= mbmi->max_mv_precision);
 
-          for (int use_optflow = 0; use_optflow < max_optflow; ++use_optflow) {
-            PREDICTION_MODE eval_mode = use_optflow ? optflow_mode : this_mode;
-            mbmi->mode = eval_mode;
+          mbmi->bawp_flag[0] = bawp_flag;
+          mbmi->bawp_flag[1] = bawp_flag_uv;
 
-            if (mbmi->mode != WARPMV && prune_modes_based_on_tpl &&
-                !ref_match_found_in_above_nb && !ref_match_found_in_left_nb &&
-                (ref_best_rd != INT64_MAX)) {
-              // Skip mode if TPL model indicates it will not be beneficial.
-              if (prune_modes_based_on_tpl_stats(
-                      &cm->features, inter_cost_info_from_tpl, refs,
-                      ref_mv_idx[0], eval_mode,
-                      cpi->sf.inter_sf.prune_inter_modes_based_on_tpl))
-                continue;
+          if (this_mode != WARPMV && !mbmi->refinemv_flag &&
+              !mask_check_bit(idx_mask[bawp_flag][mbmi->pb_mv_precision][0],
+                              ref_mv_idx_type)) {
+            continue;
+          }
+
+          if (bawp_flag_uv == 0) {
+            mode_info[bawp_flag][mbmi->pb_mv_precision][0][ref_mv_idx_type]
+                .full_search_mv.as_int = INVALID_MV;
+            mode_info[bawp_flag][mbmi->pb_mv_precision][0][ref_mv_idx_type]
+                .mv.as_int = INVALID_MV;
+            mode_info[bawp_flag][mbmi->pb_mv_precision][0][ref_mv_idx_type].rd =
+                INT64_MAX;
+            mode_info[bawp_flag][mbmi->pb_mv_precision][0][ref_mv_idx_type]
+                .drl_cost = drl_cost;
+          }
+
+          assert(!(mbmi->bawp_flag[0] && mbmi->refinemv_flag));
+
+          if (mbmi->bawp_flag[0] >= 1) {
+            bawp_off_mv[1].as_int = -1;
+            for (i = 0; i < 1; ++i) {
+              mbmi->mv[i].as_int = bawp_off_mv[i].as_int;
+              cur_mv[i].as_int = bawp_off_mv[i].as_int;
             }
 
-            if (use_optflow && mbmi->cwp_idx != CWP_EQUAL) continue;
+            mode_info[mbmi->bawp_flag[0]][mbmi->pb_mv_precision][0]
+                     [ref_mv_idx_type]
+                         .full_search_mv.as_int =
+                mode_info[0][mbmi->pb_mv_precision][0][ref_mv_idx_type]
+                    .full_search_mv.as_int;
+            mode_info[mbmi->bawp_flag[0]][mbmi->pb_mv_precision][0]
+                     [ref_mv_idx_type]
+                         .full_mv_rate =
+                mode_info[0][mbmi->pb_mv_precision][0][ref_mv_idx_type]
+                    .full_mv_rate;
 
-            if (!has_second_drl(mbmi) && ref_mv_idx[1] > 0) continue;
+            rate_mv = bawp_off_rate_mv;
+            if (bawp_off_newmv_ret_val != 0) continue;
+          } else {
+            if (have_newmv_in_inter_mode(this_mode)) {
+#if CONFIG_COLLECT_COMPONENT_TIMING
+              start_timing(cpi, handle_newmv_time);
+#endif
+              newmv_ret_val =
+                  handle_newmv(cpi, x, bsize, cur_mv, &rate_mv, args,
+                               mode_info[bawp_flag][mbmi->pb_mv_precision][0]);
 
-            if (skip_eval_mode[use_optflow]) continue;
-
-            const int drl_cost =
-                get_drl_cost(cm->features.max_drl_bits, mbmi, mbmi_ext, x);
-
-            const int prediction_mode_cost = cost_prediction_mode(
-                mode_costs, eval_mode, cm, mbmi, xd, mode_ctx);
-
-            const int base_rate = args->ref_frame_cost +
-                                  args->single_comp_cost + prediction_mode_cost;
-
-            if (use_optflow) {
-              // Optical flow compound modes are only enabled when prediction
-              // is bi-directional and non 4xn/nx4 blocks
-              if (!opfl_allowed_cur_refs_bsize(cm, xd, mbmi) ||
-                  cm->features.opfl_refine_type == REFINE_ALL ||
-                  is_thin_4xn_nx4_block(bsize))
-                continue;
+#if CONFIG_COLLECT_COMPONENT_TIMING
+              end_timing(cpi, handle_newmv_time);
+#endif
+              bawp_off_rate_mv = rate_mv;
+              for (i = 0; i < 1; ++i) {
+                bawp_off_mv[i].as_int = cur_mv[i].as_int;
+              }
+              bawp_off_newmv_ret_val = newmv_ret_val;
+              if (newmv_ret_val != 0) continue;
             }
-
-            const int jmvd_scale_mode_cost =
-                get_jmvd_scale_mode_cost(mbmi, mode_costs);
-            const int rate_so_far = base_rate + drl_cost +
-                                    flex_mv_cost[mbmi->pb_mv_precision] +
-                                    jmvd_scale_mode_cost;
-
-            if (cpi->sf.inter_sf.skip_mode_eval_based_on_rate_cost &&
-                ref_best_rd != INT64_MAX &&
-                RDCOST(x->rdmult, rate_so_far, 0) > ref_best_rd) {
-              continue;
-            }
-
-            // apply early termination method to jmvd scaling factors
-            if (cpi->sf.inter_sf.early_terminate_jmvd_scale_factor) {
-              if (scale_index > 0 && (!is_inter_compound_mode(best_ref_mode)) &&
-                  mbmi->pb_mv_precision <= MV_PRECISION_HALF_PEL &&
-                  best_mbmi.jmvd_scale_mode == 0 &&
-                  best_mbmi.pb_mv_precision > MV_PRECISION_HALF_PEL)
-                continue;
-            }
-
-            if (is_pb_mv_prec_active) {
-              if (cpi->sf.flexmv_sf.terminate_early_4_pel_precision &&
-                  pb_mv_precision < MV_PRECISION_FOUR_PEL &&
-                  best_precision_so_far[use_optflow] >= MV_PRECISION_QTR_PEL)
-                continue;
-              if (prune_curr_mv_precision_eval(
-                      cpi->sf.flexmv_sf.prune_mv_prec_using_best_mv_prec_so_far,
-                      precision_dx, best_precision_dx_so_far[use_optflow]))
-                continue;
-              if (mbmi->ref_mv_idx[0] || mbmi->ref_mv_idx[1]) {
-                if (cpi->sf.flexmv_sf.do_not_search_8_pel_precision &&
-                    mbmi->pb_mv_precision == MV_PRECISION_8_PEL)
-                  continue;
-
-                if (cpi->sf.flexmv_sf.do_not_search_4_pel_precision &&
-                    mbmi->pb_mv_precision == MV_PRECISION_FOUR_PEL)
-                  continue;
+          }
+          if (have_newmv_in_inter_mode(this_mode)) {
+            int mv_outlim = 0;
+            for (int ref = 0; ref < 1; ref++) {
+              const PREDICTION_MODE single_mode =
+                  get_single_mode(this_mode, ref);
+              if (single_mode == NEWMV || single_mode == WARP_NEWMV) {
+                SUBPEL_MOTION_SEARCH_PARAMS ms_params;
+                MV ref_mv = av2_get_ref_mv(x, ref).as_mv;
+                if (mbmi->pb_mv_precision < MV_PRECISION_HALF_PEL)
+                  lower_mv_precision(&ref_mv, mbmi->pb_mv_precision);
+                av2_make_default_subpel_ms_params(&ms_params, cpi, x, bsize,
+                                                  &ref_mv, pb_mv_precision, 0,
+                                                  NULL);
+                if (!av2_is_subpelmv_in_range(&ms_params.mv_limits,
+                                              cur_mv[ref].as_mv)) {
+                  mv_outlim = 1;
+                  break;
+                }
               }
             }
+            if (mv_outlim) continue;
 
-            // Get the default value of DMVR flag based on mode
-            assert(mbmi->motion_mode == SIMPLE_TRANSLATION);
-            mbmi->refinemv_flag = get_default_refinemv_flag(cm, mbmi);
-
-            int_mv cur_mv[2];
-            // TODO(Cherma): Extend this speed feature to support compound mode
-            int skip_repeated_ref_mv =
-                is_comp_pred ? 0 : cpi->sf.inter_sf.skip_repeated_ref_mv;
-            // Generate the current mv according to the prediction mode
-            if (mbmi->mode != WARPMV &&
-                !build_cur_mv(cur_mv, eval_mode, cm, x, skip_repeated_ref_mv)) {
+            int skip_new_mv =
+                cpi->sf.inter_sf.skip_repeated_newmv ||
+                (mbmi->pb_mv_precision != mbmi->max_mv_precision &&
+                 cpi->sf.flexmv_sf.skip_repeated_newmv_low_prec);
+            if (skip_new_mv &&
+                skip_repeated_newmv(
+                    cpi, x, bsize, do_tx_search, this_mode,
+                    mbmi->pb_mv_precision, mbmi->bawp_flag[0],
+                    mbmi->bawp_flag[1], &best_mbmi, motion_mode_cand,
+                    &ref_best_rd, &best_rd_stats, &best_rd_stats_y,
+                    &best_rd_stats_uv,
+                    mode_info[bawp_flag][mbmi->pb_mv_precision][0], args,
+                    drl_cost, refs, cur_mv, &best_rd, orig_dst, ref_mv_idx))
               continue;
-            }
-            // For WARPMV mode we will build MV in the later stage
-            // Currently initialize to 0
-            if (mbmi->mode == WARPMV) {
-              cur_mv[0].as_int = 0;
-              cur_mv[1].as_int = 0;
+          }
 
-              assert(ref_mv_idx[0] == 0 && ref_mv_idx[1] == 0);
-            }
+          const MB_MODE_INFO base_mbmi_single = *mbmi;
+          PredictorIterationContext it_ctx;
+          init_predictor_iteration_context(
+              &it_ctx, bsize, 0, ref_mv_idx[0], ref_mv_idx[1], precision_dx,
+              bawp_flag, ref_mv_idx_type, 0, NULL, this_mode, refs,
+              flex_mv_cost, drl_cost, jmvd_scale_mode_cost, base_rate, cur_mv,
+              rate_mv, base_mbmi_single, 0, num_planes,
+              skip_eval_mode_motion[0]);
 
-            if (mbmi->mode != WARPMV && cpi->sf.flexmv_sf.skip_similar_ref_mv &&
-                skip_similar_ref_mv(cpi, x, bsize)) {
+          evaluate_inter_predictor(cpi, tile_data, x, &env, &it_ctx,
+                                   &search_state);
+          *mbmi = base_mbmi_single;
+        }
+      } else {
+        for (int scale_index = 0; scale_index < jmvd_scaling_factor_num;
+             ++scale_index) {
+          mbmi->jmvd_scale_mode = scale_index;
+          if (is_joint_amvd_coding_mode(mbmi->mode, mbmi->use_amvd)) {
+            if (scale_index > JOINT_AMVD_SCALE_FACTOR_CNT - 1) continue;
+          }
+          if (cpi->sf.inter_sf.early_terminate_jmvd_scale_factor) {
+            if (scale_index > 0 && best_rd > 1.5 * ref_best_rd &&
+                (!is_inter_compound_mode(best_ref_mode)))
               continue;
-            }
+          }
+          // apply early termination method to jmvd scaling factors
+          if (cpi->sf.inter_sf.early_terminate_jmvd_scale_factor) {
+            if (scale_index > 0 && (ref_mv_idx[0] > 0 || ref_mv_idx[1] > 0) &&
+                best_mbmi.jmvd_scale_mode == 0 &&
+                (best_mbmi.ref_mv_idx[0] < ref_mv_idx[0] ||
+                 best_mbmi.ref_mv_idx[1] < ref_mv_idx[1]))
+              continue;
+          }
 
-            assert(IMPLIES(mbmi->mode == WARPMV,
-                           mbmi->pb_mv_precision == mbmi->max_mv_precision));
+          cwp_loop_num = cm->features.enable_cwp ? MAX_CWP_NUM : 1;
+          if (best_cwp_idxs[scale_index] == CWP_EQUAL &&
+              (ref_mv_idx[0] > 0 || ref_mv_idx[1] > 0))
+            cwp_loop_num = 1;
 
-            int_mv bawp_off_mv[2];
-            int64_t bawp_off_newmv_ret_val = 0;
-            int bawp_off_rate_mv = 0;
-            for (i = 0; i < is_comp_pred + 1; ++i) {
-              bawp_off_mv[i].as_int = cur_mv[i].as_int;
-            }
+          for (int cwp_search_idx = 0; cwp_search_idx < cwp_loop_num;
+               cwp_search_idx++) {
+            mbmi->cwp_idx = cwp_weighting_factor[same_side][cwp_search_idx];
 
-            int bawp_eanbled = cm->features.enable_bawp &&
-                               !mbmi->refinemv_flag &&
-                               av2_allow_bawp(cm, mbmi, xd->mi_row, xd->mi_col);
-            if (bawp_eanbled && av2_allow_explicit_bawp(mbmi))
-              bawp_eanbled += EXPLICIT_BAWP_SCALE_CNT;
-
-            const int total_bawp_iters =
-                (bawp_eanbled == 0) ? 1 : (1 + 2 * bawp_eanbled);
-            for (int b_idx = 0; b_idx < total_bawp_iters; b_idx++) {
-              int bawp_flag = (b_idx + 1) / 2;
-              int bawp_flag_uv = (b_idx == 0) ? 0 : ((b_idx + 1) % 2);
-
-              if (mbmi->ref_mv_idx[0] > 0 && bawp_flag > 1 &&
-                  best_mbmi.bawp_flag[0] == 0)
-                continue;
-
-              if (bawp_flag_uv &&
-                  (!xd->is_chroma_ref || cm->seq_params.monochrome)) {
+            if (mbmi->cwp_idx != CWP_EQUAL) {
+              if (!is_cwp_allowed(mbmi)) break;
+              if (cwp_search_mask[cwp_search_idx] == 0) {
                 continue;
               }
+            }
+            if (mbmi->cwp_idx == -1) {
+              break;
+            }
+            pb_mv_precision = precision_def->precision[precision_dx];
+            mbmi->pb_mv_precision = pb_mv_precision;
+            if (!is_pb_mv_prec_active &&
+                (pb_mv_precision != mbmi->max_mv_precision)) {
+              continue;
+            }
+            assert(pb_mv_precision <= mbmi->max_mv_precision);
+
+            for (int use_optflow = 0; use_optflow < max_optflow;
+                 ++use_optflow) {
+              PREDICTION_MODE eval_mode =
+                  use_optflow ? optflow_mode : this_mode;
+              mbmi->mode = eval_mode;
+
+              if (mbmi->mode != WARPMV && prune_modes_based_on_tpl &&
+                  !ref_match_found_in_above_nb && !ref_match_found_in_left_nb &&
+                  (ref_best_rd != INT64_MAX)) {
+                // Skip mode if TPL model indicates it will not be beneficial.
+                if (prune_modes_based_on_tpl_stats(
+                        &cm->features, inter_cost_info_from_tpl, refs,
+                        ref_mv_idx[0], eval_mode,
+                        cpi->sf.inter_sf.prune_inter_modes_based_on_tpl))
+                  continue;
+              }
+
+              if (use_optflow && mbmi->cwp_idx != CWP_EQUAL) continue;
+
+              if (!has_second_drl(mbmi) && ref_mv_idx[1] > 0) continue;
+
+              if (skip_eval_mode[use_optflow]) continue;
+
+              const int drl_cost =
+                  get_drl_cost(cm->features.max_drl_bits, mbmi, mbmi_ext, x);
+
+              const int prediction_mode_cost = cost_prediction_mode(
+                  mode_costs, eval_mode, cm, mbmi, xd, mode_ctx);
+
+              const int base_rate = args->ref_frame_cost +
+                                    args->single_comp_cost +
+                                    prediction_mode_cost;
+
+              if (use_optflow) {
+                // Optical flow compound modes are only enabled when prediction
+                // is bi-directional and non 4xn/nx4 blocks
+                if (!opfl_allowed_cur_refs_bsize(cm, xd, mbmi) ||
+                    cm->features.opfl_refine_type == REFINE_ALL ||
+                    is_thin_4xn_nx4_block(bsize))
+                  continue;
+              }
+
+              const int jmvd_scale_mode_cost =
+                  get_jmvd_scale_mode_cost(mbmi, mode_costs);
+              const int rate_so_far = base_rate + drl_cost +
+                                      flex_mv_cost[mbmi->pb_mv_precision] +
+                                      jmvd_scale_mode_cost;
+
+              if (cpi->sf.inter_sf.skip_mode_eval_based_on_rate_cost &&
+                  ref_best_rd != INT64_MAX &&
+                  RDCOST(x->rdmult, rate_so_far, 0) > ref_best_rd) {
+                continue;
+              }
+
+              // apply early termination method to jmvd scaling factors
+              if (cpi->sf.inter_sf.early_terminate_jmvd_scale_factor) {
+                if (scale_index > 0 &&
+                    (!is_inter_compound_mode(best_ref_mode)) &&
+                    mbmi->pb_mv_precision <= MV_PRECISION_HALF_PEL &&
+                    best_mbmi.jmvd_scale_mode == 0 &&
+                    best_mbmi.pb_mv_precision > MV_PRECISION_HALF_PEL)
+                  continue;
+              }
+
+              if (is_pb_mv_prec_active) {
+                if (cpi->sf.flexmv_sf.terminate_early_4_pel_precision &&
+                    pb_mv_precision < MV_PRECISION_FOUR_PEL &&
+                    best_precision_so_far[use_optflow] >= MV_PRECISION_QTR_PEL)
+                  continue;
+                if (prune_curr_mv_precision_eval(
+                        cpi->sf.flexmv_sf
+                            .prune_mv_prec_using_best_mv_prec_so_far,
+                        precision_dx, best_precision_dx_so_far[use_optflow]))
+                  continue;
+                if (mbmi->ref_mv_idx[0] || mbmi->ref_mv_idx[1]) {
+                  if (cpi->sf.flexmv_sf.do_not_search_8_pel_precision &&
+                      mbmi->pb_mv_precision == MV_PRECISION_8_PEL)
+                    continue;
+
+                  if (cpi->sf.flexmv_sf.do_not_search_4_pel_precision &&
+                      mbmi->pb_mv_precision == MV_PRECISION_FOUR_PEL)
+                    continue;
+                }
+              }
+
+              // Get the default value of DMVR flag based on mode
+              assert(mbmi->motion_mode == SIMPLE_TRANSLATION);
+              mbmi->refinemv_flag = get_default_refinemv_flag(cm, mbmi);
+
+              int_mv cur_mv[2];
+              // TODO(Cherma): Extend this speed feature to support compound
+              // mode
+              int skip_repeated_ref_mv = 0;
+              // Generate the current mv according to the prediction mode
+              if (mbmi->mode != WARPMV &&
+                  !build_cur_mv(cur_mv, eval_mode, cm, x,
+                                skip_repeated_ref_mv)) {
+                continue;
+              }
+              // For WARPMV mode we will build MV in the later stage
+              // Currently initialize to 0
+              if (mbmi->mode == WARPMV) {
+                cur_mv[0].as_int = 0;
+                cur_mv[1].as_int = 0;
+
+                assert(ref_mv_idx[0] == 0 && ref_mv_idx[1] == 0);
+              }
+
+              if (mbmi->mode != WARPMV &&
+                  cpi->sf.flexmv_sf.skip_similar_ref_mv &&
+                  skip_similar_ref_mv(cpi, x, bsize)) {
+                continue;
+              }
+
+              assert(IMPLIES(mbmi->mode == WARPMV,
+                             mbmi->pb_mv_precision == mbmi->max_mv_precision));
+
+              int bawp_flag = 0;
+              int bawp_flag_uv = 0;
 
               mbmi->bawp_flag[0] = bawp_flag;
               mbmi->bawp_flag[1] = bawp_flag_uv;
@@ -5549,74 +5755,41 @@ static int64_t handle_inter_mode(
                 continue;
               }
 
-              if (bawp_flag_uv == 0) {
-                mode_info[bawp_flag][mbmi->pb_mv_precision][use_optflow]
-                         [ref_mv_idx_type]
-                             .full_search_mv.as_int = INVALID_MV;
-                mode_info[bawp_flag][mbmi->pb_mv_precision][use_optflow]
-                         [ref_mv_idx_type]
-                             .mv.as_int = INVALID_MV;
-                mode_info[bawp_flag][mbmi->pb_mv_precision][use_optflow]
-                         [ref_mv_idx_type]
-                             .rd = INT64_MAX;
-                mode_info[bawp_flag][mbmi->pb_mv_precision][use_optflow]
-                         [ref_mv_idx_type]
-                             .drl_cost = drl_cost;
-              }
+              mode_info[bawp_flag][mbmi->pb_mv_precision][use_optflow]
+                       [ref_mv_idx_type]
+                           .full_search_mv.as_int = INVALID_MV;
+              mode_info[bawp_flag][mbmi->pb_mv_precision][use_optflow]
+                       [ref_mv_idx_type]
+                           .mv.as_int = INVALID_MV;
+              mode_info[bawp_flag][mbmi->pb_mv_precision][use_optflow]
+                       [ref_mv_idx_type]
+                           .rd = INT64_MAX;
+              mode_info[bawp_flag][mbmi->pb_mv_precision][use_optflow]
+                       [ref_mv_idx_type]
+                           .drl_cost = drl_cost;
 
               assert(!(mbmi->bawp_flag[0] && mbmi->refinemv_flag));
 
-              if (mbmi->bawp_flag[0] >= 1) {
-                bawp_off_mv[1].as_int = -1;  // bawp_off_mv[1] won't be used
-                                             // when mbmi->bawp_flag==1.
-                assert(is_comp_pred == 0);
-                for (i = 0; i < is_comp_pred + 1; ++i) {
-                  mbmi->mv[i].as_int = bawp_off_mv[i].as_int;
-                  cur_mv[i].as_int = bawp_off_mv[i].as_int;
-                }
-
-                mode_info[mbmi->bawp_flag[0]][mbmi->pb_mv_precision]
-                         [use_optflow][ref_mv_idx_type]
-                             .full_search_mv.as_int =
-                    mode_info[0][mbmi->pb_mv_precision][use_optflow]
-                             [ref_mv_idx_type]
-                                 .full_search_mv.as_int;
-                mode_info[mbmi->bawp_flag[0]][mbmi->pb_mv_precision]
-                         [use_optflow][ref_mv_idx_type]
-                             .full_mv_rate =
-                    mode_info[0][mbmi->pb_mv_precision][use_optflow]
-                             [ref_mv_idx_type]
-                                 .full_mv_rate;
-
-                rate_mv = bawp_off_rate_mv;
-                if (bawp_off_newmv_ret_val != 0) continue;
-              } else {
-                // The above call to build_cur_mv does not handle NEWMV modes.
-                // Build the mv here if we have NEWMV for any predictors.
-                if (have_newmv_in_inter_mode(this_mode)) {
+              // The above call to build_cur_mv does not handle NEWMV modes.
+              // Build the mv here if we have NEWMV for any predictors.
+              if (have_newmv_in_inter_mode(eval_mode)) {
 #if CONFIG_COLLECT_COMPONENT_TIMING
-                  start_timing(cpi, handle_newmv_time);
+                start_timing(cpi, handle_newmv_time);
 #endif
-                  newmv_ret_val = handle_newmv(
-                      cpi, x, bsize, cur_mv, &rate_mv, args,
-                      mode_info[bawp_flag][mbmi->pb_mv_precision][use_optflow]);
+                newmv_ret_val = handle_newmv(
+                    cpi, x, bsize, cur_mv, &rate_mv, args,
+                    mode_info[bawp_flag][mbmi->pb_mv_precision][use_optflow]);
 
 #if CONFIG_COLLECT_COMPONENT_TIMING
-                  end_timing(cpi, handle_newmv_time);
+                end_timing(cpi, handle_newmv_time);
 #endif
-                  bawp_off_rate_mv = rate_mv;
-                  for (i = 0; i < is_comp_pred + 1; ++i) {
-                    bawp_off_mv[i].as_int = cur_mv[i].as_int;
-                  }
-                  bawp_off_newmv_ret_val = newmv_ret_val;
-                  if (newmv_ret_val != 0) continue;
-                }
+                if (newmv_ret_val != 0) continue;
               }
-              if (have_newmv_in_inter_mode(this_mode)) {
+              if (have_newmv_in_inter_mode(eval_mode)) {
                 int mv_outlim = 0;
-                for (int ref = 0; ref < is_comp_pred + 1; ref++) {
+                for (int ref = 0; ref < 2; ref++) {
                   const PREDICTION_MODE single_mode =
-                      get_single_mode(this_mode, ref);
+                      get_single_mode(eval_mode, ref);
                   if (single_mode == NEWMV || single_mode == WARP_NEWMV) {
                     SUBPEL_MOTION_SEARCH_PARAMS ms_params;
                     MV ref_mv = av2_get_ref_mv(x, ref).as_mv;
