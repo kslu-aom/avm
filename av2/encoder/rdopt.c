@@ -2276,6 +2276,441 @@ static int eval_interintra(const AV2_COMP *const cpi, MACROBLOCK *const x,
   return 1;
 }
 
+static int eval_warp_causal(
+    const AV2_COMP *const cpi, MACROBLOCK *const x, MACROBLOCKD *const xd,
+    const AV2_COMMON *const cm, MB_MODE_INFO *mbmi, MB_MODE_INFO_EXT *mbmi_ext,
+    BLOCK_SIZE bsize, int mi_row, int mi_col, const BUFFER_SET *orig_dst,
+    PREDICTION_MODE this_mode, int rate2_nocoeff, int rate_mv0,
+    int_mv *previous_mvs, int total_samples0, int total_samples1, int *pts0,
+    int *pts_inref0, int *pts1, int *pts_inref1, uint8_t org_warp_inter_intra,
+    HandleInterModeArgs *const args, int64_t ref_best_rd, int *tmp_rate2,
+    int *tmp_rate_mv) {
+  int pts[SAMPLES_ARRAY_SIZE], pts_inref[SAMPLES_ARRAY_SIZE];
+  mbmi->wm_params[0].wmtype = DEFAULT_WMTYPE;
+  mbmi->wm_params[1].wmtype = DEFAULT_WMTYPE;
+
+  mbmi->warp_inter_intra = 0;  // initialize to 0 so that warp search can-be
+                               // performed without inter-intra
+
+  int_mv warp_ref_mv = mbmi->mv[0];
+  // Build the motion vector of the WARPMV mode
+  if (mbmi->mode == WARPMV) {
+    WarpedMotionParams ref_model =
+        mbmi_ext
+            ->warp_param_stack[av2_ref_frame_type(mbmi->ref_frame)]
+                              [mbmi->warp_ref_idx]
+            .wm_params;
+    mbmi->mv[0] = get_mv_from_wrl(xd, &ref_model,
+                                  mbmi->warpmv_with_mvd_flag
+                                      ? mbmi->pb_mv_precision
+                                      : MV_PRECISION_ONE_EIGHTH_PEL,
+                                  bsize, xd->mi_col, xd->mi_row);
+
+    if (!is_warp_candidate_inside_of_frame(cm, xd, mbmi->mv[0])) return 0;
+    assert(mbmi->pb_mv_precision == mbmi->max_mv_precision);
+
+    warp_ref_mv.as_int = mbmi->mv[0].as_int;
+    // search MVD if mbmi->warpmv_with_mvd_flag is used.
+    if (mbmi->warpmv_with_mvd_flag) {
+      if (previous_mvs[mbmi->warp_ref_idx].as_int == INVALID_MV) {
+        int tmp_trans_ratemv = 0;
+        {
+          if (mbmi->use_amvd) {
+            av2_amvd_single_motion_search(cpi, x, bsize, &warp_ref_mv.as_mv,
+                                          &tmp_trans_ratemv, 0);
+          } else {
+            av2_single_motion_search(cpi, x, bsize, 0, &tmp_trans_ratemv, 16,
+                                     NULL, &mbmi->mv[0], &warp_ref_mv);
+          }
+        }
+        previous_mvs[mbmi->warp_ref_idx].as_int = mbmi->mv[0].as_int;
+      } else {
+        mbmi->mv[0].as_int = previous_mvs[mbmi->warp_ref_idx].as_int;
+      }
+    }
+  }
+  int l0_invalid = 1, l1_invalid = 1;
+  mbmi->num_proj_ref[0] = total_samples0;
+  mbmi->num_proj_ref[1] = total_samples1;
+  memcpy(pts, pts0, total_samples0 * 2 * sizeof(*pts0));
+  memcpy(pts_inref, pts_inref0, total_samples0 * 2 * sizeof(*pts_inref0));
+  // Compute the warped motion parameters with a least squares fit
+  //  using the collected samples
+  av2_find_projection(mbmi->num_proj_ref[0], pts, pts_inref, bsize,
+                      mbmi->mv[0].as_mv, &mbmi->wm_params[0], mi_row, mi_col
+
+                      ,
+                      get_ref_scale_factors_const(cm, mbmi->ref_frame[0])
+
+  );
+  l0_invalid = mbmi->wm_params[0].invalid;
+
+  if (has_second_ref(mbmi)) {
+    memcpy(pts, pts1, total_samples1 * 2 * sizeof(*pts1));
+    memcpy(pts_inref, pts_inref1, total_samples1 * 2 * sizeof(*pts_inref1));
+    //  Compute the warped motion parameters with a least squares
+    //  fit
+    //   using the collected samples
+    av2_find_projection(mbmi->num_proj_ref[1], pts, pts_inref, bsize,
+                        mbmi->mv[1].as_mv, &mbmi->wm_params[1], mi_row, mi_col
+
+                        ,
+                        get_ref_scale_factors_const(cm, mbmi->ref_frame[1])
+
+    );
+    l1_invalid = mbmi->wm_params[1].invalid;
+  }
+
+  if (!l0_invalid && (!has_second_ref(mbmi) || !l1_invalid)) {
+    if ((((this_mode == WARP_NEWMV || this_mode == NEW_NEWMV) && !l0_invalid) &&
+         (mbmi->pb_mv_precision >= MV_PRECISION_ONE_PEL))
+
+        || mbmi->warpmv_with_mvd_flag) {
+      // Refine MV for NEWMV mode
+      const int_mv mv0 = mbmi->mode == WARPMV ? warp_ref_mv : mbmi->mv[0];
+      const int_mv ref_mv = mbmi->warpmv_with_mvd_flag ? warp_ref_mv :
+
+                                                       av2_get_ref_mv(x, 0);
+      const MvSubpelPrecision pb_mv_precision = mbmi->pb_mv_precision;
+
+      SUBPEL_MOTION_SEARCH_PARAMS ms_params;
+      av2_make_default_subpel_ms_params(
+          &ms_params, cpi, x, bsize, &ref_mv.as_mv, pb_mv_precision, 0, NULL);
+      // Refine MV in a small range.
+      av2_refine_warped_mv(xd, cm, &ms_params, bsize, pts0, pts_inref0,
+                           total_samples0, 0, cpi->sf.mv_sf.warp_search_method,
+                           cpi->sf.mv_sf.warp_search_iters);
+      if (mv0.as_int != mbmi->mv[0].as_int || mbmi->warpmv_with_mvd_flag) {
+        // Keep the refined MV and WM parameters.
+        // Keep the refined MV and WM parameters.
+        if (mbmi->mode == NEW_NEWMV) {
+          int tmp_rate_mv0 = av2_mv_bit_cost(
+              &mv0.as_mv, &ref_mv.as_mv, pb_mv_precision, &x->mv_costs,
+              MV_COST_WEIGHT, ms_params.mv_cost_params.is_adaptive_mvd);
+          *tmp_rate_mv = av2_mv_bit_cost(
+              &mbmi->mv[0].as_mv, &ref_mv.as_mv, pb_mv_precision, &x->mv_costs,
+              MV_COST_WEIGHT, ms_params.mv_cost_params.is_adaptive_mvd);
+
+          *tmp_rate2 = rate2_nocoeff - tmp_rate_mv0 + *tmp_rate_mv;
+        } else {
+          *tmp_rate_mv = av2_mv_bit_cost(
+              &mbmi->mv[0].as_mv, &ref_mv.as_mv, pb_mv_precision, &x->mv_costs,
+              MV_COST_WEIGHT, ms_params.mv_cost_params.is_adaptive_mvd);
+          *tmp_rate2 = rate2_nocoeff - rate_mv0 + *tmp_rate_mv;
+        }
+      }
+    }
+    if (!l1_invalid && this_mode == NEW_NEWMV) {
+      // Refine MV for NEWMV mode
+      const int_mv mv1 = mbmi->mv[1];
+      const int_mv ref_mv = av2_get_ref_mv(x, 1);
+
+      const MvSubpelPrecision pb_mv_precision = mbmi->pb_mv_precision;
+
+      SUBPEL_MOTION_SEARCH_PARAMS ms_params;
+      av2_make_default_subpel_ms_params(&ms_params, cpi, x, bsize,
+                                        &ref_mv.as_mv,
+
+                                        pb_mv_precision, 0, NULL);
+      // Refine MV in a small range.
+      av2_refine_warped_mv(xd, cm, &ms_params, bsize, pts1, pts_inref1,
+                           total_samples1, 1, cpi->sf.mv_sf.warp_search_method,
+                           cpi->sf.mv_sf.warp_search_iters);
+
+      if (mv1.as_int != mbmi->mv[1].as_int) {
+        // Keep the refined MV and WM parameters.
+        int tmp_rate_mv1 = av2_mv_bit_cost(
+            &mv1.as_mv, &ref_mv.as_mv, pb_mv_precision, &x->mv_costs,
+            MV_COST_WEIGHT, ms_params.mv_cost_params.is_adaptive_mvd);
+        *tmp_rate_mv = av2_mv_bit_cost(
+            &mbmi->mv[1].as_mv, &ref_mv.as_mv, pb_mv_precision, &x->mv_costs,
+            MV_COST_WEIGHT, ms_params.mv_cost_params.is_adaptive_mvd);
+
+        *tmp_rate2 = *tmp_rate2 - tmp_rate_mv1 + *tmp_rate_mv;
+      }
+    }
+    if (!mbmi->wm_params[0].invalid)
+      assign_warpmv(cm, xd->submi, bsize, &mbmi->wm_params[0], mi_row, mi_col,
+                    0);
+    if (!mbmi->wm_params[1].invalid)
+      assign_warpmv(cm, xd->submi, bsize, &mbmi->wm_params[1], mi_row, mi_col,
+                    1);
+
+    mbmi->warp_inter_intra = org_warp_inter_intra;
+    if (mbmi->warp_inter_intra) {
+      const int ret =
+          av2_handle_inter_intra_mode(cpi, x, bsize, mbmi, args, ref_best_rd,
+                                      tmp_rate_mv, tmp_rate2, orig_dst);
+      if (ret < 0) return 0;
+    }
+
+    // Build the warped predictor
+    av2_enc_build_inter_predictor(cm, xd, mi_row, mi_col, NULL, bsize, 0,
+                                  av2_num_planes(cm) - 1);
+  } else {
+    return 0;
+  }
+  return 1;
+}
+
+static int eval_warp_delta(const AV2_COMP *const cpi, MACROBLOCK *const x,
+                           MACROBLOCKD *const xd, const AV2_COMMON *const cm,
+                           MB_MODE_INFO *mbmi, MB_MODE_INFO_EXT *mbmi_ext,
+                           BLOCK_SIZE bsize, int mi_row, int mi_col,
+                           const BUFFER_SET *orig_dst, int rate2_nocoeff,
+                           int rate_mv0, int_mv *previous_mvs,
+                           warp_mode_info_array *prev_best_models,
+                           uint8_t org_warp_inter_intra,
+                           HandleInterModeArgs *const args, int64_t ref_best_rd,
+                           int *tmp_rate2, int *tmp_rate_mv) {
+  if (mbmi->mode == WARP_NEWMV &&
+      mbmi->pb_mv_precision < MV_PRECISION_ONE_PEL) {
+    // Don't bother with warp modes for MV precisions >1px
+    return 0;
+  }
+
+  int_mv wrl_ref_mv = mbmi->mv[0];
+  mbmi->warp_inter_intra = 0;  // initialize to 0 so that warp search can-be
+                               // performed without inter-intra
+
+  // Build the motion vector of the WARPMV mode
+  if (mbmi->mode == WARPMV) {
+    WarpedMotionParams ref_model =
+        mbmi_ext
+            ->warp_param_stack[av2_ref_frame_type(mbmi->ref_frame)]
+                              [mbmi->warp_ref_idx]
+            .wm_params;
+    mbmi->mv[0] =
+        get_mv_from_wrl(xd, &ref_model,
+
+                        mbmi->warpmv_with_mvd_flag ? mbmi->pb_mv_precision :
+
+                                                   MV_PRECISION_ONE_EIGHTH_PEL,
+                        bsize, xd->mi_col, xd->mi_row);
+
+    assert(mbmi->pb_mv_precision == mbmi->max_mv_precision);
+
+    if (!is_warp_candidate_inside_of_frame(cm, xd, mbmi->mv[0])) return 0;
+    wrl_ref_mv = mbmi->mv[0];
+  }
+  int_mv mv0 = mbmi->mv[0];
+  const int_mv ref_mv =
+      (mbmi->mode == WARPMV) ? wrl_ref_mv : av2_get_ref_mv(x, 0);
+  SUBPEL_MOTION_SEARCH_PARAMS ms_params;
+  av2_make_default_subpel_ms_params(&ms_params, cpi, x, bsize, &ref_mv.as_mv,
+
+                                    mbmi->pb_mv_precision, 0, NULL);
+  int valid = 0;
+
+  mbmi->six_param_warp_model_flag = 0;
+  if (!allow_warp_parameter_signaling(cm, mbmi)) {
+    if (mbmi->warp_precision_idx) return 0;
+
+    // Default parameters are not searched if the delta is not
+    // signalled
+    if (mbmi_ext
+            ->warp_param_stack[av2_ref_frame_type(mbmi->ref_frame)]
+                              [mbmi->warp_ref_idx]
+            .proj_type == PROJ_DEFAULT)
+      return 0;
+    // search MVD if mbmi->warpmv_with_mvd_flag is used.
+    if (mbmi->mode == WARPMV && mbmi->warpmv_with_mvd_flag) {
+      if (previous_mvs[mbmi->warp_ref_idx].as_int == INVALID_MV) {
+        int tmp_trans_ratemv = 0;
+        {
+          av2_single_motion_search(cpi, x, bsize, 0, &tmp_trans_ratemv, 16,
+                                   NULL, &mbmi->mv[0], &ref_mv);
+        }
+        previous_mvs[mbmi->warp_ref_idx].as_int = mbmi->mv[0].as_int;
+      } else {
+        mbmi->mv[0].as_int = previous_mvs[mbmi->warp_ref_idx].as_int;
+      }
+    }
+    valid = av2_refine_mv_for_base_param_warp_model(
+        cm, xd, mbmi, mbmi_ext, &ms_params, cpi->sf.mv_sf.warp_search_method,
+        cpi->sf.mv_sf.warp_search_iters);
+  } else {
+    mbmi->six_param_warp_model_flag = get_default_six_param_flag(cm, mbmi);
+    valid = av2_pick_warp_delta(
+        cm, xd, mbmi, &ms_params, &x->mode_costs, prev_best_models,
+        mbmi_ext->warp_param_stack[av2_ref_frame_type(mbmi->ref_frame)]);
+  }
+
+  if (!valid) {
+    return 0;
+  }
+
+  // If we changed the MV, update costs
+  if (mv0.as_int != mbmi->mv[0].as_int || mbmi->warpmv_with_mvd_flag) {
+    // Keep the refined MV and WM parameters.
+    *tmp_rate_mv = av2_mv_bit_cost(
+        &mbmi->mv[0].as_mv, &ref_mv.as_mv, mbmi->pb_mv_precision, &x->mv_costs,
+        MV_COST_WEIGHT, ms_params.mv_cost_params.is_adaptive_mvd);
+
+    *tmp_rate2 = rate2_nocoeff - rate_mv0 + *tmp_rate_mv;
+    assert(mbmi->mode == WARP_NEWMV || mbmi->warpmv_with_mvd_flag);
+    assert(IMPLIES(mbmi->mode == WARPMV, rate_mv0 == 0));
+  }
+  assign_warpmv(cm, xd->submi, bsize, &mbmi->wm_params[0], mi_row, mi_col, 0);
+  mbmi->warp_inter_intra = org_warp_inter_intra;
+  if (mbmi->warp_inter_intra) {
+    const int ret =
+        av2_handle_inter_intra_mode(cpi, x, bsize, mbmi, args, ref_best_rd,
+                                    tmp_rate_mv, tmp_rate2, orig_dst);
+    if (ret < 0) return 0;
+  }
+  av2_enc_build_inter_predictor(cm, xd, mi_row, mi_col, NULL, bsize, 0,
+                                av2_num_planes(cm) - 1);
+  return 1;
+}
+
+static int eval_warp_extend(const AV2_COMP *const cpi, MACROBLOCK *const x,
+                            MACROBLOCKD *const xd, const AV2_COMMON *const cm,
+                            MB_MODE_INFO *mbmi, MB_MODE_INFO_EXT *mbmi_ext,
+                            BLOCK_SIZE bsize, int mi_row, int mi_col,
+                            const BUFFER_SET *orig_dst, int rate2_nocoeff,
+                            int rate_mv0, uint8_t org_warp_inter_intra,
+                            HandleInterModeArgs *const args,
+                            int64_t ref_best_rd, int *tmp_rate2,
+                            int *tmp_rate_mv) {
+  if (mbmi->mode == WARP_NEWMV &&
+      mbmi->pb_mv_precision < MV_PRECISION_ONE_PEL) {
+    // Don't bother with warp modes for MV precisions >1px
+    return 0;
+  }
+  mbmi->warp_inter_intra = 0;  // initialize to 0 so that warp search can-be
+                               // performed without inter-intra
+  CANDIDATE_MV *neighbor =
+      &mbmi_ext->ref_mv_stack[mbmi->ref_frame[0]][get_ref_mv_idx(mbmi, 0)];
+  POSITION base_pos = { 0, 0 };
+  if (!get_extend_base_pos(cm, xd, mbmi, neighbor->row_offset,
+                           neighbor->col_offset, &base_pos)) {
+    return 0;
+  }
+  const MB_MODE_INFO *neighbor_mi =
+      xd->mi[base_pos.row * xd->mi_stride + base_pos.col];
+
+  assert(!is_tip_ref_frame(neighbor_mi->ref_frame[0]));
+
+  if (mbmi->mode == NEARMV) {
+    assert(is_warp_mode(neighbor_mi->motion_mode));
+#if !COMPOUND_WARP_LINE_BUFFER_REDUCTION
+    if (neighbor_mi->wm_params[0].invalid &&
+        neighbor_mi->wm_params[1].invalid) {
+      // Skip invalid models
+      return 0;
+    }
+    if (mbmi->ref_frame[0] == neighbor_mi->ref_frame[1] &&
+        !neighbor_mi->wm_params[1].invalid)
+      mbmi->wm_params[0] = neighbor_mi->wm_params[1];
+    else if (!neighbor_mi->wm_params[0].invalid)
+      mbmi->wm_params[0] = neighbor_mi->wm_params[0];
+    else
+      mbmi->wm_params[0] = neighbor_mi->wm_params[1];
+#else
+    if (neighbor_mi->wm_params[0].invalid) {
+      // Skip invalid models
+      return 0;
+    }
+    mbmi->wm_params[0] = neighbor_mi->wm_params[0];
+#endif  // !COMPOUND_WARP_LINE_BUFFER_REDUCTION
+  } else {
+    assert(mbmi->mode == WARP_NEWMV);
+
+    bool neighbor_is_above =
+        xd->up_available && (base_pos.row == -1 && base_pos.col >= 0);
+
+    WarpedMotionParams neighbor_params;
+    av2_get_neighbor_warp_model(cm, xd, neighbor_mi, &neighbor_params);
+
+    const int_mv ref_mv = av2_get_ref_mv(x, 0);
+    SUBPEL_MOTION_SEARCH_PARAMS ms_params;
+    av2_make_default_subpel_ms_params(&ms_params, cpi, x, bsize, &ref_mv.as_mv,
+                                      mbmi->pb_mv_precision, 0, NULL);
+    const SubpelMvLimits *mv_limits = &ms_params.mv_limits;
+
+    // Backup initial motion vector and resulting warp params
+    int_mv mv0 = mbmi->mv[0];
+    WarpedMotionParams wm_params0;
+    if (!av2_extend_warp_model(
+            neighbor_is_above, bsize, &mbmi->mv[0].as_mv, mi_row, mi_col,
+            &neighbor_params, &wm_params0
+
+            ,
+            get_ref_scale_factors_const(cm, mbmi->ref_frame[0])
+
+                )) {
+      // NEWMV search produced a valid model
+      mbmi->wm_params[0] = wm_params0;
+    } else {
+      // NEWMV search did not produce a valid model, so fall back to
+      // starting with the motion vector predicted by the neighbor's
+      // warp model (if any)
+      mbmi->mv[0] = get_warp_motion_vector(
+          xd, &neighbor_params, mbmi->pb_mv_precision, bsize, mi_col, mi_row);
+
+      if (mbmi->pb_mv_precision >= MV_PRECISION_HALF_PEL) {
+        FULLPEL_MV tmp_full_mv = get_fullmv_from_mv(&mbmi->mv[0].as_mv);
+        MV tmp_sub_mv = get_mv_from_fullmv(&tmp_full_mv);
+        MV sub_mv_offset = { 0, 0 };
+        get_phase_from_mv(ref_mv.as_mv, &sub_mv_offset, mbmi->pb_mv_precision);
+        mbmi->mv[0].as_mv.col = tmp_sub_mv.col + sub_mv_offset.col;
+        mbmi->mv[0].as_mv.row = tmp_sub_mv.row + sub_mv_offset.row;
+      }
+      // Check that the prediction is in range
+      if (!av2_is_subpelmv_in_range(mv_limits, mbmi->mv[0].as_mv)) {
+        return 0;
+      }
+
+      // Regenerate model with this new MV
+      if (av2_extend_warp_model(
+              neighbor_is_above, bsize, &mbmi->mv[0].as_mv, mi_row, mi_col,
+              &neighbor_params, &mbmi->wm_params[0]
+
+              ,
+              get_ref_scale_factors_const(cm, mbmi->ref_frame[0])
+
+                  )) {
+        return 0;
+      }
+    }
+
+    // Refine motion vector. The final choice of MV and warp model
+    // are stored directly into `mbmi`
+    av2_refine_mv_for_warp_extend(
+        cm, xd, &ms_params, neighbor_is_above, bsize, &neighbor_params,
+        cpi->sf.mv_sf.warp_search_method, cpi->sf.mv_sf.warp_search_iters);
+
+    // If we changed the MV, update costs
+    if (mv0.as_int != mbmi->mv[0].as_int) {
+      // Keep the refined MV and WM parameters.
+      *tmp_rate_mv =
+          av2_mv_bit_cost(&mbmi->mv[0].as_mv, &ref_mv.as_mv,
+                          mbmi->pb_mv_precision, &x->mv_costs, MV_COST_WEIGHT,
+                          ms_params.mv_cost_params.is_adaptive_mvd);
+      *tmp_rate2 = rate2_nocoeff - rate_mv0 + *tmp_rate_mv;
+    } else {
+      // Restore the old MV and WM parameters.
+      mbmi->mv[0] = mv0;
+      mbmi->wm_params[0] = wm_params0;
+    }
+  }
+
+  assign_warpmv(cm, xd->submi, bsize, &mbmi->wm_params[0], mi_row, mi_col, 0);
+
+  mbmi->warp_inter_intra = org_warp_inter_intra;
+  if (mbmi->warp_inter_intra) {
+    const int ret =
+        av2_handle_inter_intra_mode(cpi, x, bsize, mbmi, args, ref_best_rd,
+                                    tmp_rate_mv, tmp_rate2, orig_dst);
+    if (ret < 0) return 0;
+  }
+  // Build the warped predictor
+  av2_enc_build_inter_predictor(cm, xd, mi_row, mi_col, NULL, bsize, 0,
+                                av2_num_planes(cm) - 1);
+  return 1;
+}
+
 static int64_t motion_mode_rd(
     const AV2_COMP *const cpi, TileDataEnc *tile_data, MACROBLOCK *const x,
     BLOCK_SIZE bsize, RD_STATS *rd_stats, RD_STATS *rd_stats_y,
@@ -2481,192 +2916,12 @@ static int64_t motion_mode_rd(
                 continue;
               }
             } else if (mbmi->motion_mode == WARP_CAUSAL) {
-              int pts[SAMPLES_ARRAY_SIZE], pts_inref[SAMPLES_ARRAY_SIZE];
-              mbmi->wm_params[0].wmtype = DEFAULT_WMTYPE;
-              mbmi->wm_params[1].wmtype = DEFAULT_WMTYPE;
-
-              mbmi->warp_inter_intra =
-                  0;  // initialize to 0 so that warp search can-be performed
-                      // without inter-intra
-
-              int_mv warp_ref_mv = mbmi->mv[0];
-              // Build the motion vector of the WARPMV mode
-              if (mbmi->mode == WARPMV) {
-                WarpedMotionParams ref_model =
-                    mbmi_ext
-                        ->warp_param_stack[av2_ref_frame_type(mbmi->ref_frame)]
-                                          [mbmi->warp_ref_idx]
-                        .wm_params;
-                mbmi->mv[0] = get_mv_from_wrl(xd, &ref_model,
-                                              mbmi->warpmv_with_mvd_flag
-                                                  ? mbmi->pb_mv_precision
-                                                  : MV_PRECISION_ONE_EIGHTH_PEL,
-                                              bsize, xd->mi_col, xd->mi_row);
-
-                if (!is_warp_candidate_inside_of_frame(cm, xd, mbmi->mv[0]))
-                  continue;
-                assert(mbmi->pb_mv_precision == mbmi->max_mv_precision);
-
-                warp_ref_mv.as_int = mbmi->mv[0].as_int;
-                // search MVD if mbmi->warpmv_with_mvd_flag is used.
-                if (mbmi->warpmv_with_mvd_flag) {
-                  if (previous_mvs[mbmi->warp_ref_idx].as_int == INVALID_MV) {
-                    int tmp_trans_ratemv = 0;
-                    {
-                      if (mbmi->use_amvd) {
-                        av2_amvd_single_motion_search(cpi, x, bsize,
-                                                      &warp_ref_mv.as_mv,
-                                                      &tmp_trans_ratemv, 0);
-                      } else {
-                        av2_single_motion_search(cpi, x, bsize, 0,
-                                                 &tmp_trans_ratemv, 16, NULL,
-                                                 &mbmi->mv[0], &warp_ref_mv);
-                      }
-                    }
-                    previous_mvs[mbmi->warp_ref_idx].as_int =
-                        mbmi->mv[0].as_int;
-                  } else {
-                    mbmi->mv[0].as_int =
-                        previous_mvs[mbmi->warp_ref_idx].as_int;
-                  }
-                }
-              }
-              int l0_invalid = 1, l1_invalid = 1;
-              mbmi->num_proj_ref[0] = total_samples0;
-              mbmi->num_proj_ref[1] = total_samples1;
-              memcpy(pts, pts0, total_samples0 * 2 * sizeof(*pts0));
-              memcpy(pts_inref, pts_inref0,
-                     total_samples0 * 2 * sizeof(*pts_inref0));
-              // Compute the warped motion parameters with a least squares fit
-              //  using the collected samples
-              av2_find_projection(
-                  mbmi->num_proj_ref[0], pts, pts_inref, bsize,
-                  mbmi->mv[0].as_mv, &mbmi->wm_params[0], mi_row, mi_col
-
-                  ,
-                  get_ref_scale_factors_const(cm, mbmi->ref_frame[0])
-
-              );
-              l0_invalid = mbmi->wm_params[0].invalid;
-
-              if (has_second_ref(mbmi)) {
-                memcpy(pts, pts1, total_samples1 * 2 * sizeof(*pts1));
-                memcpy(pts_inref, pts_inref1,
-                       total_samples1 * 2 * sizeof(*pts_inref1));
-                //  Compute the warped motion parameters with a least squares
-                //  fit
-                //   using the collected samples
-                av2_find_projection(
-                    mbmi->num_proj_ref[1], pts, pts_inref, bsize,
-                    mbmi->mv[1].as_mv, &mbmi->wm_params[1], mi_row, mi_col
-
-                    ,
-                    get_ref_scale_factors_const(cm, mbmi->ref_frame[1])
-
-                );
-                l1_invalid = mbmi->wm_params[1].invalid;
-              }
-
-              if (!l0_invalid && (!has_second_ref(mbmi) || !l1_invalid)) {
-                if ((((this_mode == WARP_NEWMV || this_mode == NEW_NEWMV) &&
-                      !l0_invalid) &&
-                     (mbmi->pb_mv_precision >= MV_PRECISION_ONE_PEL)) ||
-                    mbmi->warpmv_with_mvd_flag) {
-                  // Refine MV for NEWMV mode
-                  const int_mv mv0 =
-                      mbmi->mode == WARPMV ? warp_ref_mv : mbmi->mv[0];
-                  const int_mv ref_mv =
-                      mbmi->warpmv_with_mvd_flag ? warp_ref_mv :
-
-                                                 av2_get_ref_mv(x, 0);
-                  const MvSubpelPrecision pb_mv_precision =
-                      mbmi->pb_mv_precision;
-
-                  SUBPEL_MOTION_SEARCH_PARAMS ms_params;
-                  av2_make_default_subpel_ms_params(&ms_params, cpi, x, bsize,
-                                                    &ref_mv.as_mv,
-                                                    pb_mv_precision, 0, NULL);
-                  // Refine MV in a small range.
-                  av2_refine_warped_mv(xd, cm, &ms_params, bsize, pts0,
-                                       pts_inref0, total_samples0, 0,
-                                       cpi->sf.mv_sf.warp_search_method,
-                                       cpi->sf.mv_sf.warp_search_iters);
-                  if (mv0.as_int != mbmi->mv[0].as_int ||
-                      mbmi->warpmv_with_mvd_flag) {
-                    // Keep the refined MV and WM parameters.
-                    // Keep the refined MV and WM parameters.
-                    if (mbmi->mode == NEW_NEWMV) {
-                      int tmp_rate_mv0 = av2_mv_bit_cost(
-                          &mv0.as_mv, &ref_mv.as_mv, pb_mv_precision,
-                          &x->mv_costs, MV_COST_WEIGHT,
-                          ms_params.mv_cost_params.is_adaptive_mvd);
-                      tmp_rate_mv = av2_mv_bit_cost(
-                          &mbmi->mv[0].as_mv, &ref_mv.as_mv, pb_mv_precision,
-                          &x->mv_costs, MV_COST_WEIGHT,
-                          ms_params.mv_cost_params.is_adaptive_mvd);
-
-                      tmp_rate2 = rate2_nocoeff - tmp_rate_mv0 + tmp_rate_mv;
-                    } else {
-                      tmp_rate_mv = av2_mv_bit_cost(
-                          &mbmi->mv[0].as_mv, &ref_mv.as_mv, pb_mv_precision,
-                          &x->mv_costs, MV_COST_WEIGHT,
-                          ms_params.mv_cost_params.is_adaptive_mvd);
-                      tmp_rate2 = rate2_nocoeff - rate_mv0 + tmp_rate_mv;
-                    }
-                  }
-                }
-                if (!l1_invalid && this_mode == NEW_NEWMV) {
-                  // Refine MV for NEWMV mode
-                  const int_mv mv1 = mbmi->mv[1];
-                  const int_mv ref_mv = av2_get_ref_mv(x, 1);
-
-                  const MvSubpelPrecision pb_mv_precision =
-                      mbmi->pb_mv_precision;
-
-                  SUBPEL_MOTION_SEARCH_PARAMS ms_params;
-                  av2_make_default_subpel_ms_params(&ms_params, cpi, x, bsize,
-                                                    &ref_mv.as_mv,
-
-                                                    pb_mv_precision, 0, NULL);
-                  // Refine MV in a small range.
-                  av2_refine_warped_mv(xd, cm, &ms_params, bsize, pts1,
-                                       pts_inref1, total_samples1, 1,
-                                       cpi->sf.mv_sf.warp_search_method,
-                                       cpi->sf.mv_sf.warp_search_iters);
-
-                  if (mv1.as_int != mbmi->mv[1].as_int) {
-                    // Keep the refined MV and WM parameters.
-                    int tmp_rate_mv1 = av2_mv_bit_cost(
-                        &mv1.as_mv, &ref_mv.as_mv, pb_mv_precision,
-                        &x->mv_costs, MV_COST_WEIGHT,
-                        ms_params.mv_cost_params.is_adaptive_mvd);
-                    tmp_rate_mv = av2_mv_bit_cost(
-                        &mbmi->mv[1].as_mv, &ref_mv.as_mv, pb_mv_precision,
-                        &x->mv_costs, MV_COST_WEIGHT,
-                        ms_params.mv_cost_params.is_adaptive_mvd);
-
-                    tmp_rate2 = tmp_rate2 - tmp_rate_mv1 + tmp_rate_mv;
-                  }
-                }
-                if (!mbmi->wm_params[0].invalid)
-                  assign_warpmv(cm, xd->submi, bsize, &mbmi->wm_params[0],
-                                mi_row, mi_col, 0);
-                if (!mbmi->wm_params[1].invalid)
-                  assign_warpmv(cm, xd->submi, bsize, &mbmi->wm_params[1],
-                                mi_row, mi_col, 1);
-
-                mbmi->warp_inter_intra = org_warp_inter_intra;
-                if (mbmi->warp_inter_intra) {
-                  const int ret = av2_handle_inter_intra_mode(
-                      cpi, x, bsize, mbmi, args, ref_best_rd, &tmp_rate_mv,
-                      &tmp_rate2, orig_dst);
-                  if (ret < 0) continue;
-                }
-
-                // Build the warped predictor
-                av2_enc_build_inter_predictor(cm, xd, mi_row, mi_col, NULL,
-                                              bsize, 0, av2_num_planes(cm) - 1);
-              } else {
+              if (!eval_warp_causal(
+                      cpi, x, xd, cm, mbmi, mbmi_ext, bsize, mi_row, mi_col,
+                      orig_dst, this_mode, rate2_nocoeff, rate_mv0,
+                      previous_mvs, total_samples0, total_samples1, pts0,
+                      pts_inref0, pts1, pts_inref1, org_warp_inter_intra, args,
+                      ref_best_rd, &tmp_rate2, &tmp_rate_mv)) {
                 continue;
               }
             } else if (mbmi->motion_mode == INTERINTRA) {
@@ -2675,288 +2930,20 @@ static int64_t motion_mode_rd(
                 continue;
               }
             } else if (mbmi->motion_mode == WARP_DELTA) {
-              if (mbmi->mode == WARP_NEWMV &&
-                  mbmi->pb_mv_precision < MV_PRECISION_ONE_PEL) {
-                // Don't bother with warp modes for MV precisions >1px
+              if (!eval_warp_delta(cpi, x, xd, cm, mbmi, mbmi_ext, bsize,
+                                   mi_row, mi_col, orig_dst, rate2_nocoeff,
+                                   rate_mv0, previous_mvs, &prev_best_models,
+                                   org_warp_inter_intra, args, ref_best_rd,
+                                   &tmp_rate2, &tmp_rate_mv)) {
                 continue;
               }
-
-              int_mv wrl_ref_mv = mbmi->mv[0];
-              mbmi->warp_inter_intra =
-                  0;  // initialize to 0 so that warp search can-be performed
-                      // without inter-intra
-
-              // Build the motion vector of the WARPMV mode
-              if (mbmi->mode == WARPMV) {
-                WarpedMotionParams ref_model =
-                    mbmi_ext
-                        ->warp_param_stack[av2_ref_frame_type(mbmi->ref_frame)]
-                                          [mbmi->warp_ref_idx]
-                        .wm_params;
-                mbmi->mv[0] = get_mv_from_wrl(
-                    xd, &ref_model,
-
-                    mbmi->warpmv_with_mvd_flag ? mbmi->pb_mv_precision :
-
-                                               MV_PRECISION_ONE_EIGHTH_PEL,
-                    bsize, xd->mi_col, xd->mi_row);
-
-                assert(mbmi->pb_mv_precision == mbmi->max_mv_precision);
-
-                if (!is_warp_candidate_inside_of_frame(cm, xd, mbmi->mv[0]))
-                  continue;
-                wrl_ref_mv = mbmi->mv[0];
-              }
-              int_mv mv0 = mbmi->mv[0];
-              const int_mv ref_mv =
-                  (mbmi->mode == WARPMV) ? wrl_ref_mv : av2_get_ref_mv(x, 0);
-              SUBPEL_MOTION_SEARCH_PARAMS ms_params;
-              av2_make_default_subpel_ms_params(&ms_params, cpi, x, bsize,
-                                                &ref_mv.as_mv,
-
-                                                mbmi->pb_mv_precision, 0, NULL);
-              int valid = 0;
-
-              mbmi->six_param_warp_model_flag = 0;
-              if (!allow_warp_parameter_signaling(cm, mbmi)) {
-                if (mbmi->warp_precision_idx) continue;
-
-                // Default parameters are not searched if the delta is not
-                // signalled
-                if (mbmi_ext
-                        ->warp_param_stack[av2_ref_frame_type(mbmi->ref_frame)]
-                                          [mbmi->warp_ref_idx]
-                        .proj_type == PROJ_DEFAULT)
-                  continue;
-                // search MVD if mbmi->warpmv_with_mvd_flag is used.
-                if (mbmi->mode == WARPMV && mbmi->warpmv_with_mvd_flag) {
-                  if (previous_mvs[mbmi->warp_ref_idx].as_int == INVALID_MV) {
-                    int tmp_trans_ratemv = 0;
-                    {
-                      av2_single_motion_search(cpi, x, bsize, 0,
-                                               &tmp_trans_ratemv, 16, NULL,
-                                               &mbmi->mv[0], &ref_mv);
-                    }
-                    previous_mvs[mbmi->warp_ref_idx].as_int =
-                        mbmi->mv[0].as_int;
-                  } else {
-                    mbmi->mv[0].as_int =
-                        previous_mvs[mbmi->warp_ref_idx].as_int;
-                  }
-                }
-                valid = av2_refine_mv_for_base_param_warp_model(
-                    cm, xd, mbmi, mbmi_ext, &ms_params,
-                    cpi->sf.mv_sf.warp_search_method,
-                    cpi->sf.mv_sf.warp_search_iters);
-              } else {
-                mbmi->six_param_warp_model_flag =
-                    get_default_six_param_flag(cm, mbmi);
-                valid = av2_pick_warp_delta(
-                    cm, xd, mbmi, &ms_params, &x->mode_costs, &prev_best_models,
-                    mbmi_ext->warp_param_stack[av2_ref_frame_type(
-                        mbmi->ref_frame)]);
-              }
-
-              if (!valid) {
-                continue;
-              }
-
-              // If we changed the MV, update costs
-              if (mv0.as_int != mbmi->mv[0].as_int ||
-                  mbmi->warpmv_with_mvd_flag) {
-                // Keep the refined MV and WM parameters.
-                tmp_rate_mv = av2_mv_bit_cost(
-                    &mbmi->mv[0].as_mv, &ref_mv.as_mv, mbmi->pb_mv_precision,
-                    &x->mv_costs, MV_COST_WEIGHT,
-                    ms_params.mv_cost_params.is_adaptive_mvd);
-
-                tmp_rate2 = rate2_nocoeff - rate_mv0 + tmp_rate_mv;
-                assert(mbmi->mode == WARP_NEWMV || mbmi->warpmv_with_mvd_flag);
-                assert(IMPLIES(mbmi->mode == WARPMV, rate_mv0 == 0));
-              }
-              assign_warpmv(cm, xd->submi, bsize, &mbmi->wm_params[0], mi_row,
-                            mi_col, 0);
-              mbmi->warp_inter_intra = org_warp_inter_intra;
-              if (mbmi->warp_inter_intra) {
-                const int ret = av2_handle_inter_intra_mode(
-                    cpi, x, bsize, mbmi, args, ref_best_rd, &tmp_rate_mv,
-                    &tmp_rate2, orig_dst);
-                if (ret < 0) continue;
-              }
-              av2_enc_build_inter_predictor(cm, xd, mi_row, mi_col, NULL, bsize,
-                                            0, av2_num_planes(cm) - 1);
             } else if (mbmi->motion_mode == WARP_EXTEND) {
-              if (mbmi->mode == WARP_NEWMV &&
-                  mbmi->pb_mv_precision < MV_PRECISION_ONE_PEL) {
-                // Don't bother with warp modes for MV precisions >1px
+              if (!eval_warp_extend(cpi, x, xd, cm, mbmi, mbmi_ext, bsize,
+                                    mi_row, mi_col, orig_dst, rate2_nocoeff,
+                                    rate_mv0, org_warp_inter_intra, args,
+                                    ref_best_rd, &tmp_rate2, &tmp_rate_mv)) {
                 continue;
               }
-              mbmi->warp_inter_intra =
-                  0;  // initialize to 0 so that warp search can-be performed
-                      // without inter-intra
-              CANDIDATE_MV *neighbor =
-                  &mbmi_ext->ref_mv_stack[mbmi->ref_frame[0]]
-                                         [get_ref_mv_idx(mbmi, 0)];
-              POSITION base_pos = { 0, 0 };
-              if (!get_extend_base_pos(cm, xd, mbmi, neighbor->row_offset,
-                                       neighbor->col_offset, &base_pos)) {
-                continue;
-              }
-              const MB_MODE_INFO *neighbor_mi =
-                  xd->mi[base_pos.row * xd->mi_stride + base_pos.col];
-
-              assert(!is_tip_ref_frame(neighbor_mi->ref_frame[0]));
-
-              if (mbmi->mode == NEARMV) {
-                assert(is_warp_mode(neighbor_mi->motion_mode));
-#if !COMPOUND_WARP_LINE_BUFFER_REDUCTION
-                if (neighbor_mi->wm_params[0].invalid &&
-                    neighbor_mi->wm_params[1].invalid) {
-                  // Skip invalid models
-                  continue;
-                }
-                if (mbmi->ref_frame[0] == neighbor_mi->ref_frame[1] &&
-                    !neighbor_mi->wm_params[1].invalid)
-                  mbmi->wm_params[0] = neighbor_mi->wm_params[1];
-                else if (!neighbor_mi->wm_params[0].invalid)
-                  mbmi->wm_params[0] = neighbor_mi->wm_params[0];
-                else
-                  mbmi->wm_params[0] = neighbor_mi->wm_params[1];
-#else
-                if (neighbor_mi->wm_params[0].invalid) {
-                  // Skip invalid models
-                  continue;
-                }
-                mbmi->wm_params[0] = neighbor_mi->wm_params[0];
-#endif  // !COMPOUND_WARP_LINE_BUFFER_REDUCTION
-              } else {
-                assert(mbmi->mode == WARP_NEWMV);
-
-                bool neighbor_is_above =
-                    xd->up_available &&
-                    (base_pos.row == -1 && base_pos.col >= 0);
-
-                WarpedMotionParams neighbor_params;
-                av2_get_neighbor_warp_model(cm, xd, neighbor_mi,
-                                            &neighbor_params);
-
-                const int_mv ref_mv = av2_get_ref_mv(x, 0);
-                SUBPEL_MOTION_SEARCH_PARAMS ms_params;
-                av2_make_default_subpel_ms_params(
-                    &ms_params, cpi, x, bsize, &ref_mv.as_mv,
-                    mbmi->pb_mv_precision, 0, NULL);
-                const SubpelMvLimits *mv_limits = &ms_params.mv_limits;
-
-                // Note: The warp filter is only able to accept small deviations
-                // from the identity transform, up to 1/4 pel of shift per
-                // pixel. Especially for small blocks, it is likely that the
-                // motion vector estimated by the newmv search will be too
-                // distant from the neighbor's motion vectors for the warp
-                // filter to be applied. However, we don't want to give up the
-                // benefits of a good initial MV in the cases where a suitable
-                // one has already been found.
-                //
-                // To get the best of both worlds, we run an initial test to see
-                // if the motion vector found by newmv search gives a valid
-                // motion model. If so, we use that as the starting point for
-                // refinement. Otherwise, we use the MV which is predicted by
-                // the neighbor's warp model
-                // TODO(rachelbarker): Do we need this logic?
-
-                // Backup initial motion vector and resulting warp params
-                int_mv mv0 = mbmi->mv[0];
-                WarpedMotionParams wm_params0;
-                if (!av2_extend_warp_model(
-                        neighbor_is_above, bsize, &mbmi->mv[0].as_mv, mi_row,
-                        mi_col, &neighbor_params, &wm_params0
-
-                        ,
-                        get_ref_scale_factors_const(cm, mbmi->ref_frame[0])
-
-                            )) {
-                  // NEWMV search produced a valid model
-                  mbmi->wm_params[0] = wm_params0;
-                } else {
-                  // NEWMV search did not produce a valid model, so fall back to
-                  // starting with the motion vector predicted by the neighbor's
-                  // warp model (if any)
-                  mbmi->mv[0] = get_warp_motion_vector(xd, &neighbor_params,
-                                                       mbmi->pb_mv_precision,
-                                                       bsize, mi_col, mi_row);
-
-                  if (mbmi->pb_mv_precision >= MV_PRECISION_HALF_PEL) {
-                    FULLPEL_MV tmp_full_mv =
-                        get_fullmv_from_mv(&mbmi->mv[0].as_mv);
-                    MV tmp_sub_mv = get_mv_from_fullmv(&tmp_full_mv);
-                    MV sub_mv_offset = { 0, 0 };
-                    get_phase_from_mv(ref_mv.as_mv, &sub_mv_offset,
-                                      mbmi->pb_mv_precision);
-                    mbmi->mv[0].as_mv.col = tmp_sub_mv.col + sub_mv_offset.col;
-                    mbmi->mv[0].as_mv.row = tmp_sub_mv.row + sub_mv_offset.row;
-                  }
-                  // Check that the prediction is in range
-                  if (!av2_is_subpelmv_in_range(mv_limits, mbmi->mv[0].as_mv)) {
-                    continue;
-                  }
-
-                  // Regenerate model with this new MV
-                  //
-                  // Note: This should be very close to the neighbor's warp
-                  // model, but may be slightly different due to rounding. So it
-                  // may be invalid even if the neighbor's warp model is valid.
-                  // Because an exact copy will already have been tried using
-                  // the NEARMV mode, we can just detect an invalid model and
-                  // bail out.
-                  //
-                  // TODO(rachelbarker): Is it worth trying to search anyway in
-                  // this case, in order to try to find a valid model?
-                  if (av2_extend_warp_model(
-                          neighbor_is_above, bsize, &mbmi->mv[0].as_mv, mi_row,
-                          mi_col, &neighbor_params, &mbmi->wm_params[0]
-
-                          ,
-                          get_ref_scale_factors_const(cm, mbmi->ref_frame[0])
-
-                              )) {
-                    continue;
-                  }
-                }
-
-                // Refine motion vector. The final choice of MV and warp model
-                // are stored directly into `mbmi`
-                av2_refine_mv_for_warp_extend(
-                    cm, xd, &ms_params, neighbor_is_above, bsize,
-                    &neighbor_params, cpi->sf.mv_sf.warp_search_method,
-                    cpi->sf.mv_sf.warp_search_iters);
-
-                // If we changed the MV, update costs
-                if (mv0.as_int != mbmi->mv[0].as_int) {
-                  // Keep the refined MV and WM parameters.
-                  tmp_rate_mv = av2_mv_bit_cost(
-                      &mbmi->mv[0].as_mv, &ref_mv.as_mv, mbmi->pb_mv_precision,
-                      &x->mv_costs, MV_COST_WEIGHT,
-                      ms_params.mv_cost_params.is_adaptive_mvd);
-                  tmp_rate2 = rate2_nocoeff - rate_mv0 + tmp_rate_mv;
-                } else {
-                  // Restore the old MV and WM parameters.
-                  mbmi->mv[0] = mv0;
-                  mbmi->wm_params[0] = wm_params0;
-                }
-              }
-
-              assign_warpmv(cm, xd->submi, bsize, &mbmi->wm_params[0], mi_row,
-                            mi_col, 0);
-
-              mbmi->warp_inter_intra = org_warp_inter_intra;
-              if (mbmi->warp_inter_intra) {
-                const int ret = av2_handle_inter_intra_mode(
-                    cpi, x, bsize, mbmi, args, ref_best_rd, &tmp_rate_mv,
-                    &tmp_rate2, orig_dst);
-                if (ret < 0) continue;
-              }
-              // Build the warped predictor
-              av2_enc_build_inter_predictor(cm, xd, mi_row, mi_col, NULL, bsize,
-                                            0, av2_num_planes(cm) - 1);
             }
 
             // If we are searching newmv and the mv is the same as refmv, skip
