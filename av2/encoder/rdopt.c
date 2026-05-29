@@ -8430,6 +8430,78 @@ static void av2_evaluate_intra_modes_in_inter(
   }
 }
 
+typedef struct {
+  MV_REFERENCE_FRAME ref_frame;
+  MV_REFERENCE_FRAME second_ref_frame;
+} RefFramePair;
+
+static int av2_get_valid_ref_frame_pairs(const AV2_COMP *cpi, MACROBLOCK *x,
+                                         MACROBLOCKD *xd, BLOCK_SIZE bsize,
+                                         PREDICTION_MODE this_mode,
+                                         RefFramePair *valid_pairs) {
+  const AV2_COMMON *const cm = &cpi->common;
+  int num_pairs = 0;
+  for (MV_REFERENCE_FRAME rf = NONE_FRAME;
+       rf < cm->ref_frames_info.num_total_refs + 1; ++rf) {
+    const MV_REFERENCE_FRAME ref_frame =
+        (rf == NONE_FRAME)
+            ? INTRA_FRAME
+            : ((rf == cm->ref_frames_info.num_total_refs) ? TIP_FRAME : rf);
+    if (is_tip_ref_frame(ref_frame) &&
+        (!is_tip_allowed(cm, xd) || !is_tip_mode(this_mode)))
+      continue;
+
+    if (this_mode < INTRA_MODE_END && ref_frame != INTRA_FRAME) continue;
+    if (this_mode >= INTRA_MODE_END && ref_frame == INTRA_FRAME) continue;
+    if (ref_frame != INTRA_FRAME && bsize == BLOCK_4X4) {
+      continue;  // disable 4x4 inter blocks
+    }
+    for (MV_REFERENCE_FRAME second_rf = NONE_FRAME;
+         second_rf < cm->ref_frames_info.num_total_refs; ++second_rf) {
+      MV_REFERENCE_FRAME second_ref_frame = second_rf;
+
+      // write this to a function
+      if (cm->bru.enabled) {
+        assert(xd->sbi->sb_active_mode == BRU_ACTIVE_SB);
+        if (xd->sbi->sb_active_mode == BRU_ACTIVE_SB) {
+          if (ref_frame != INVALID_IDX && cm->bru.update_ref_idx == ref_frame) {
+            continue;
+          }
+          if (second_ref_frame != INVALID_IDX &&
+              cm->bru.update_ref_idx == second_ref_frame) {
+            continue;
+          }
+        }
+      }
+      if ((ref_frame == second_ref_frame) &&
+          (is_joint_mvd_coding_mode(this_mode)))
+        continue;
+
+      if (second_ref_frame != NONE_FRAME && this_mode < COMP_INTER_MODE_START)
+        continue;
+      if (this_mode >= COMP_INTER_MODE_START &&
+          this_mode < COMP_INTER_MODE_END && second_ref_frame == NONE_FRAME)
+        continue;
+      if (is_inter_ref_frame(second_ref_frame) &&
+          ((second_ref_frame < ref_frame) ||
+           is_compound_mode_disallowed(this_mode, ref_frame,
+                                       second_ref_frame) ||
+           ((second_ref_frame == ref_frame) &&
+            (ref_frame >= cm->ref_frames_info.num_same_ref_compound))))
+        continue;
+
+      if (is_tip_ref_frame(ref_frame) && second_ref_frame != NONE_FRAME)
+        continue;
+
+      valid_pairs[num_pairs].ref_frame = ref_frame;
+      valid_pairs[num_pairs].second_ref_frame = second_ref_frame;
+      num_pairs++;
+    }
+  }
+
+  return num_pairs;
+}
+
 void av2_rd_pick_inter_mode_sb(struct AV2_COMP *cpi,
                                struct TileDataEnc *tile_data,
                                struct macroblock *x, struct RD_STATS *rd_cost,
@@ -8727,99 +8799,52 @@ void av2_rd_pick_inter_mode_sb(struct AV2_COMP *cpi,
       }
     }
 
-    for (MV_REFERENCE_FRAME rf = NONE_FRAME;
-         rf < cm->ref_frames_info.num_total_refs + 1; ++rf) {
-      const MV_REFERENCE_FRAME ref_frame =
-          (rf == NONE_FRAME)
-              ? INTRA_FRAME
-              : ((rf == cm->ref_frames_info.num_total_refs) ? TIP_FRAME : rf);
-      if (is_tip_ref_frame(ref_frame) &&
-          (!is_tip_allowed(cm, xd) || !is_tip_mode(this_mode)))
+    RefFramePair valid_pairs[REF_FRAMES * REF_FRAMES];
+    int num_pairs = av2_get_valid_ref_frame_pairs(cpi, x, xd, bsize, this_mode,
+                                                  valid_pairs);
+
+    for (int pair_idx = 0; pair_idx < num_pairs; ++pair_idx) {
+      const MV_REFERENCE_FRAME ref_frame = valid_pairs[pair_idx].ref_frame;
+      const MV_REFERENCE_FRAME second_ref_frame =
+          valid_pairs[pair_idx].second_ref_frame;
+      const MV_REFERENCE_FRAME ref_frames[2] = { ref_frame, second_ref_frame };
+
+      init_mbmi(mbmi, this_mode, ref_frames, cm, xd, xd->sbi);
+
+      if ((this_mode == WARPMV || this_mode == WARP_NEWMV) &&
+          !is_warpmv_mode_allowed(cm, mbmi, bsize))
         continue;
 
-      if (this_mode < INTRA_MODE_END && ref_frame != INTRA_FRAME) continue;
-      if (this_mode >= INTRA_MODE_END && ref_frame == INTRA_FRAME) continue;
-      if (ref_frame != INTRA_FRAME && bsize == BLOCK_4X4) {
-        continue;  // disable 4x4 inter blocks
-      }
-      for (MV_REFERENCE_FRAME second_rf = NONE_FRAME;
-           second_rf < cm->ref_frames_info.num_total_refs; ++second_rf) {
-        MV_REFERENCE_FRAME second_ref_frame = second_rf;
+      if (this_mode == WARP_NEWMV &&
+          !is_warp_newmv_allowed(cm, xd, mbmi, bsize))
+        continue;
 
-        // write this to a function
-        if (cm->bru.enabled) {
-          assert(xd->sbi->sb_active_mode == BRU_ACTIVE_SB);
-          if (xd->sbi->sb_active_mode == BRU_ACTIVE_SB) {
-            if (ref_frame != INVALID_IDX &&
-                cm->bru.update_ref_idx == ref_frame) {
-              continue;
-            }
-            if (second_ref_frame != INVALID_IDX &&
-                cm->bru.update_ref_idx == second_ref_frame) {
-              continue;
-            }
-          }
-        }
-        if ((ref_frame == second_ref_frame) &&
-            (is_joint_mvd_coding_mode(this_mode)))
-          continue;
+      init_submi(xd, cm, mi_row, mi_col, bsize);
 
-        if (second_ref_frame != NONE_FRAME && this_mode < COMP_INTER_MODE_START)
-          continue;
-        if (this_mode >= COMP_INTER_MODE_START &&
-            this_mode < COMP_INTER_MODE_END && second_ref_frame == NONE_FRAME)
-          continue;
-        if (is_inter_ref_frame(second_ref_frame) &&
-            ((second_ref_frame < ref_frame) ||
-             is_compound_mode_disallowed(this_mode, ref_frame,
-                                         second_ref_frame) ||
-             ((second_ref_frame == ref_frame) &&
-              (ref_frame >= cm->ref_frames_info.num_same_ref_compound))))
-          continue;
+      set_mv_precision(mbmi, mbmi->max_mv_precision);
+      if (is_pb_mv_precision_active(cm, mbmi, bsize))
+        set_most_probable_mv_precision(cm, mbmi, bsize);
 
-        if (is_tip_ref_frame(ref_frame) && second_ref_frame != NONE_FRAME)
-          continue;
+      // Initialize compound average type for optical flow refinement
+      mbmi->interinter_comp.type = COMPOUND_AVERAGE;
 
-        const MV_REFERENCE_FRAME ref_frames[2] = { ref_frame,
-                                                   second_ref_frame };
+      // Optical flow compound modes are only enabled
+      // when prediction is bi-directional
+      if (this_mode >= NEAR_NEARMV_OPTFLOW &&
+          (!opfl_allowed_cur_refs_bsize(cm, xd, mbmi) ||
+           cm->features.opfl_refine_type == REFINE_ALL))
+        continue;
+      // Optical flow is disabled for 4xn/nx4 blocks
+      if (is_thin_4xn_nx4_block(bsize) && (this_mode >= NEAR_NEARMV_OPTFLOW))
+        continue;
 
+      int num_amvd_modes = 1 + allow_amvd_mode(mbmi->mode);
+      for (int use_amvd_mode = 0; use_amvd_mode < num_amvd_modes;
+           ++use_amvd_mode) {
+        mbmi->use_amvd = use_amvd_mode;
         const int is_single_pred =
             ref_frame != INTRA_FRAME && second_ref_frame == NONE_FRAME;
         const int comp_pred = is_inter_ref_frame(second_ref_frame);
-
-        init_mbmi(mbmi, this_mode, ref_frames, cm, xd, xd->sbi);
-
-        if ((this_mode == WARPMV || this_mode == WARP_NEWMV) &&
-            !is_warpmv_mode_allowed(cm, mbmi, bsize))
-          continue;
-
-        if (this_mode == WARP_NEWMV &&
-            !is_warp_newmv_allowed(cm, xd, mbmi, bsize))
-          continue;
-
-        init_submi(xd, cm, mi_row, mi_col, bsize);
-
-        set_mv_precision(mbmi, mbmi->max_mv_precision);
-        if (is_pb_mv_precision_active(cm, mbmi, bsize))
-          set_most_probable_mv_precision(cm, mbmi, bsize);
-
-        // Initialize compound average type for optical flow refinement
-        mbmi->interinter_comp.type = COMPOUND_AVERAGE;
-
-        // Optical flow compound modes are only enabled
-        // when prediction is bi-directional
-        if (this_mode >= NEAR_NEARMV_OPTFLOW &&
-            (!opfl_allowed_cur_refs_bsize(cm, xd, mbmi) ||
-             cm->features.opfl_refine_type == REFINE_ALL))
-          continue;
-        // Optical flow is disabled for 4xn/nx4 blocks
-        if (is_thin_4xn_nx4_block(bsize) && (this_mode >= NEAR_NEARMV_OPTFLOW))
-          continue;
-
-        int num_amvd_modes = 1 + allow_amvd_mode(mbmi->mode);
-        for (int use_amvd_mode = 0; use_amvd_mode < num_amvd_modes;
-             ++use_amvd_mode) {
-          mbmi->use_amvd = use_amvd_mode;
 
           if (cm->seq_params.enable_adaptive_mvd) {
             if (mbmi->mode == NEW_NEARMV || mbmi->mode == NEAR_NEWMV ||
@@ -8833,133 +8858,131 @@ void av2_rd_pick_inter_mode_sb(struct AV2_COMP *cpi,
             }
           }
 
-          txfm_info->skip_txfm = 0;
-          num_single_modes_processed += is_single_pred;
-          set_ref_ptrs(cm, xd, ref_frame, second_ref_frame);
+        txfm_info->skip_txfm = 0;
+        num_single_modes_processed += is_single_pred;
+        set_ref_ptrs(cm, xd, ref_frame, second_ref_frame);
 
-          // Apply speed features to decide if this inter mode can be skipped
-          if (skip_inter_mode(cpi, x, bsize, ref_frame_rd, this_mode,
-                              ref_frames, &sf_args))
+        // Apply speed features to decide if this inter mode can be skipped
+        if (skip_inter_mode(cpi, x, bsize, ref_frame_rd, this_mode, ref_frames,
+                            &sf_args))
+          continue;
+
+        if (cm->seq_params.enable_adaptive_mvd == 0 && mbmi->use_amvd == 1)
+          continue;
+
+        if (is_joint_mvd_coding_mode(this_mode) &&
+            cm->seq_params.enable_joint_mvd == 0)
+          continue;
+
+        // Select prediction reference frames.
+        for (i = 0; i < num_planes; i++) {
+          xd->plane[i].pre[0] = yv12_mb[COMPACT_INDEX0_NRS(ref_frame)][i];
+          if (comp_pred)
+            xd->plane[i].pre[1] =
+                yv12_mb[COMPACT_INDEX0_NRS(second_ref_frame)][i];
+        }
+
+        mbmi->fsc_mode[PLANE_TYPE_Y] = 0;
+        mbmi->fsc_mode[PLANE_TYPE_UV] = 0;
+        mbmi->use_intrabc[0] = 0;
+        mbmi->use_intrabc[1] = 0;
+        mbmi->angle_delta[PLANE_TYPE_Y] = 0;
+        mbmi->angle_delta[PLANE_TYPE_UV] = 0;
+        mbmi->use_intra_dip = 0;
+        mbmi->use_dpcm_y = 0;
+        mbmi->dpcm_mode_y = 0;
+        mbmi->use_dpcm_uv = 0;
+        mbmi->dpcm_mode_uv = 0;
+        mbmi->ref_mv_idx[0] = 0;
+        mbmi->ref_mv_idx[1] = 0;
+        mbmi->warp_ref_idx = 0;
+        mbmi->max_num_warp_candidates = 0;
+        mbmi->warpmv_with_mvd_flag = 0;
+        const int64_t ref_best_rd = search_state.best_rd;
+        RD_STATS rd_stats, rd_stats_y, rd_stats_uv;
+        av2_init_rd_stats(&rd_stats);
+
+        const int ref_frame_index = COMPACT_INDEX0_NRS(ref_frame);
+
+        const int ref_frame_cost =
+            comp_pred ? ref_costs_comp[ref_frame][second_ref_frame]
+                      : ref_costs_single[ref_frame_index];
+
+        const int compmode_cost =
+            (is_comp_ref_allowed(mbmi->sb_type[PLANE_TYPE_Y]) &&
+             !is_tip_ref_frame(ref_frame))
+                ? comp_inter_cost[comp_pred]
+                : 0;
+        const int real_compmode_cost =
+            cm->current_frame.reference_mode == REFERENCE_MODE_SELECT
+                ? compmode_cost
+                : 0;
+        // Point to variables that are maintained between loop iterations
+        args.single_newmv = search_state.single_newmv;
+        args.single_newmv_rate = search_state.single_newmv_rate;
+        args.single_newmv_valid = search_state.single_newmv_valid;
+        args.single_comp_cost = real_compmode_cost;
+        args.ref_frame_cost = ref_frame_cost;
+
+        int64_t skip_rd[2] = { search_state.best_skip_rd[0],
+                               search_state.best_skip_rd[1] };
+
+        int64_t this_rd = handle_inter_mode(
+            cpi, tile_data, x, bsize, &rd_stats, &rd_stats_y, &rd_stats_uv,
+            &args, ref_best_rd, tmp_buf, &x->comp_rd_buffer, &best_est_rd,
+            do_tx_search, inter_modes_info, &motion_mode_cand, skip_rd,
+            search_state.best_mbmode.mode,
+            enable_tx_prune ? top_motion_mode_model_rd : NULL,
+            &inter_cost_info_from_tpl);
+
+        if (sf->inter_sf.prune_comp_search_by_single_result > 0 &&
+            is_inter_singleref_mode(this_mode)) {
+          collect_single_states(cm, x, &search_state, mbmi);
+        }
+
+        if (sf->inter_sf.prune_comp_using_best_single_mode_ref > 0 &&
+            is_inter_singleref_mode(this_mode))
+          update_best_single_mode(&search_state, this_mode, ref_frame, this_rd);
+
+        if (this_rd == INT64_MAX) continue;
+        if (mbmi->skip_txfm[xd->tree_type == CHROMA_PART]) {
+          rd_stats_y.rate = 0;
+          rd_stats_uv.rate = 0;
+        }
+
+        if (sf->inter_sf.prune_compound_using_single_ref && is_single_pred &&
+            this_rd < ref_frame_rd[ref_frame_index]) {
+          ref_frame_rd[ref_frame_index] = this_rd;
+        }
+
+        // Did this mode help, i.e., is it the new best mode
+        if (this_rd < search_state.best_rd) {
+          if (is_tip_ref_frame(ref_frame) &&
+              this_rd + TIP_RD_CORRECTION > search_state.best_rd) {
             continue;
-
-          if (cm->seq_params.enable_adaptive_mvd == 0 && mbmi->use_amvd == 1)
-            continue;
-
-          if (is_joint_mvd_coding_mode(this_mode) &&
-              cm->seq_params.enable_joint_mvd == 0)
-            continue;
-
-          // Select prediction reference frames.
-          for (i = 0; i < num_planes; i++) {
-            xd->plane[i].pre[0] = yv12_mb[COMPACT_INDEX0_NRS(ref_frame)][i];
-            if (comp_pred)
-              xd->plane[i].pre[1] =
-                  yv12_mb[COMPACT_INDEX0_NRS(second_ref_frame)][i];
           }
+          assert(IMPLIES(comp_pred,
+                         cm->current_frame.reference_mode != SINGLE_REFERENCE));
+          update_search_state(&search_state, rd_cost, ctx, &rd_stats,
+                              &rd_stats_y, &rd_stats_uv, this_mode, x,
+                              do_tx_search, cm);
+          if (do_tx_search) search_state.best_skip_rd[0] = skip_rd[0];
+          search_state.best_skip_rd[1] = skip_rd[1];
+        }
+        if (cpi->sf.winner_mode_sf.motion_mode_for_winner_cand) {
+          // Add this mode to motion mode candidate list for motion mode
+          // search if using motion_mode_for_winner_cand speed feature
+          handle_winner_cand(mbmi, &best_motion_mode_cands,
+                             max_winner_motion_mode_cand, this_rd,
+                             &motion_mode_cand, args.skip_motion_mode);
+        }
 
-          mbmi->fsc_mode[PLANE_TYPE_Y] = 0;
-          mbmi->fsc_mode[PLANE_TYPE_UV] = 0;
-          mbmi->use_intrabc[0] = 0;
-          mbmi->use_intrabc[1] = 0;
-          mbmi->angle_delta[PLANE_TYPE_Y] = 0;
-          mbmi->angle_delta[PLANE_TYPE_UV] = 0;
-          mbmi->use_intra_dip = 0;
-          mbmi->use_dpcm_y = 0;
-          mbmi->dpcm_mode_y = 0;
-          mbmi->use_dpcm_uv = 0;
-          mbmi->dpcm_mode_uv = 0;
-          mbmi->ref_mv_idx[0] = 0;
-          mbmi->ref_mv_idx[1] = 0;
-          mbmi->warp_ref_idx = 0;
-          mbmi->max_num_warp_candidates = 0;
-          mbmi->warpmv_with_mvd_flag = 0;
-          const int64_t ref_best_rd = search_state.best_rd;
-          RD_STATS rd_stats, rd_stats_y, rd_stats_uv;
-          av2_init_rd_stats(&rd_stats);
-
-          const int ref_frame_index = COMPACT_INDEX0_NRS(ref_frame);
-
-          const int ref_frame_cost =
-              comp_pred ? ref_costs_comp[ref_frame][second_ref_frame]
-                        : ref_costs_single[ref_frame_index];
-
-          const int compmode_cost =
-              (is_comp_ref_allowed(mbmi->sb_type[PLANE_TYPE_Y]) &&
-               !is_tip_ref_frame(ref_frame))
-                  ? comp_inter_cost[comp_pred]
-                  : 0;
-          const int real_compmode_cost =
-              cm->current_frame.reference_mode == REFERENCE_MODE_SELECT
-                  ? compmode_cost
-                  : 0;
-          // Point to variables that are maintained between loop iterations
-          args.single_newmv = search_state.single_newmv;
-          args.single_newmv_rate = search_state.single_newmv_rate;
-          args.single_newmv_valid = search_state.single_newmv_valid;
-          args.single_comp_cost = real_compmode_cost;
-          args.ref_frame_cost = ref_frame_cost;
-
-          int64_t skip_rd[2] = { search_state.best_skip_rd[0],
-                                 search_state.best_skip_rd[1] };
-
-          int64_t this_rd = handle_inter_mode(
-              cpi, tile_data, x, bsize, &rd_stats, &rd_stats_y, &rd_stats_uv,
-              &args, ref_best_rd, tmp_buf, &x->comp_rd_buffer, &best_est_rd,
-              do_tx_search, inter_modes_info, &motion_mode_cand, skip_rd,
-              search_state.best_mbmode.mode,
-              enable_tx_prune ? top_motion_mode_model_rd : NULL,
-              &inter_cost_info_from_tpl);
-
-          if (sf->inter_sf.prune_comp_search_by_single_result > 0 &&
-              is_inter_singleref_mode(this_mode)) {
-            collect_single_states(cm, x, &search_state, mbmi);
-          }
-
-          if (sf->inter_sf.prune_comp_using_best_single_mode_ref > 0 &&
-              is_inter_singleref_mode(this_mode))
-            update_best_single_mode(&search_state, this_mode, ref_frame,
-                                    this_rd);
-
-          if (this_rd == INT64_MAX) continue;
-          if (mbmi->skip_txfm[xd->tree_type == CHROMA_PART]) {
-            rd_stats_y.rate = 0;
-            rd_stats_uv.rate = 0;
-          }
-
-          if (sf->inter_sf.prune_compound_using_single_ref && is_single_pred &&
-              this_rd < ref_frame_rd[ref_frame_index]) {
-            ref_frame_rd[ref_frame_index] = this_rd;
-          }
-
-          // Did this mode help, i.e., is it the new best mode
-          if (this_rd < search_state.best_rd) {
-            if (is_tip_ref_frame(ref_frame) &&
-                this_rd + TIP_RD_CORRECTION > search_state.best_rd) {
-              continue;
-            }
-            assert(IMPLIES(comp_pred, cm->current_frame.reference_mode !=
-                                          SINGLE_REFERENCE));
-            update_search_state(&search_state, rd_cost, ctx, &rd_stats,
-                                &rd_stats_y, &rd_stats_uv, this_mode, x,
-                                do_tx_search, cm);
-            if (do_tx_search) search_state.best_skip_rd[0] = skip_rd[0];
-            search_state.best_skip_rd[1] = skip_rd[1];
-          }
-          if (cpi->sf.winner_mode_sf.motion_mode_for_winner_cand) {
-            // Add this mode to motion mode candidate list for motion mode
-            // search if using motion_mode_for_winner_cand speed feature
-            handle_winner_cand(mbmi, &best_motion_mode_cands,
-                               max_winner_motion_mode_cand, this_rd,
-                               &motion_mode_cand, args.skip_motion_mode);
-          }
-
-          /* keep record of best compound/single-only prediction */
-          record_best_compound(cm->current_frame.reference_mode, &rd_stats,
-                               comp_pred, x->rdmult, &search_state,
-                               compmode_cost);
-        }  // end of use_amvd mode loop
-      }  // end of ref1 loop
-    }  // end of ref0 loop
+        /* keep record of best compound/single-only prediction */
+        record_best_compound(cm->current_frame.reference_mode, &rd_stats,
+                             comp_pred, x->rdmult, &search_state,
+                             compmode_cost);
+      }  // end of use_amvd mode loop
+    }  // end of ref frame valid pairs loop
   }  // end of mode loop
 
   if (cpi->sf.winner_mode_sf.motion_mode_for_winner_cand) {
