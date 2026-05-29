@@ -2742,12 +2742,17 @@ static int eval_warp_extend(const AV2_COMP *const cpi, MACROBLOCK *const x,
   return 1;
 }
 
-static void update_motion_mode_rate_costs(
-    const AV2_COMP *const cpi, MACROBLOCK *const x, MACROBLOCKD *const xd,
-    const AV2_COMMON *const cm, MB_MODE_INFO *mbmi, MB_MODE_INFO_EXT *mbmi_ext,
-    BLOCK_SIZE bsize, int mi_row, int mi_col, TxfmSearchInfo *txfm_info,
-    RD_STATS *rd_stats, int tmp_rate2, int switchable_rate,
-    int allowed_motion_modes) {
+static void update_motion_mode_rate_costs(const AV2_COMP *const cpi,
+                                          MACROBLOCK *const x, BLOCK_SIZE bsize,
+                                          int mi_row, int mi_col,
+                                          RD_STATS *rd_stats, int tmp_rate2,
+                                          int switchable_rate,
+                                          int allowed_motion_modes) {
+  MACROBLOCKD *const xd = &x->e_mbd;
+  const AV2_COMMON *const cm = &cpi->common;
+  MB_MODE_INFO *const mbmi = xd->mi[0];
+  MB_MODE_INFO_EXT *const mbmi_ext = x->mbmi_ext;
+  TxfmSearchInfo *const txfm_info = &x->txfm_search_info;
   // Update rd_stats for the current motion mode
   txfm_info->skip_txfm = 0;
   rd_stats->dist = 0;
@@ -2850,13 +2855,17 @@ static void update_motion_mode_rate_costs(
 
 static int estimate_or_search_tx(
     const AV2_COMP *const cpi, TileDataEnc *tile_data, MACROBLOCK *const x,
-    MACROBLOCKD *const xd, const AV2_COMMON *const cm, MB_MODE_INFO *mbmi,
     BLOCK_SIZE bsize, RD_STATS *rd_stats, RD_STATS *rd_stats_y,
     RD_STATS *rd_stats_uv, int do_tx_search, int is_comp_pred,
     InterModesInfo *inter_modes_info, int64_t *best_est_rd,
     int64_t *ref_skip_rd, const MV_REFERENCE_FRAME ref_frame_1,
     int enable_tx_prune, int64_t top_motion_mode_model_rd[], int mode_index,
-    int64_t *ref_best_rd, const int num_planes, const ModeCosts *mode_costs) {
+    int64_t *ref_best_rd) {
+  MACROBLOCKD *const xd = &x->e_mbd;
+  const AV2_COMMON *const cm = &cpi->common;
+  MB_MODE_INFO *const mbmi = xd->mi[0];
+  const ModeCosts *const mode_costs = &x->mode_costs;
+  const int num_planes = av2_num_planes(cm);
   if (!do_tx_search) {
     // Avoid doing a transform search here to speed up the overall
     // mode search. It will be done later in the mode search if the
@@ -3200,19 +3209,15 @@ static int64_t motion_mode_rd(
             // the current mode
             if (!av2_check_newmv_joint_nonzero(cm, x)) continue;
 
-            update_motion_mode_rate_costs(cpi, x, xd, cm, mbmi, mbmi_ext, bsize,
-                                          mi_row, mi_col, txfm_info, rd_stats,
-                                          tmp_rate2, switchable_rate,
+            update_motion_mode_rate_costs(cpi, x, bsize, mi_row, mi_col,
+                                          rd_stats, tmp_rate2, switchable_rate,
                                           allowed_motion_modes);
 
-            const ModeCosts *mode_costs = &x->mode_costs;
-
             const int tx_ret = estimate_or_search_tx(
-                cpi, tile_data, x, xd, cm, mbmi, bsize, rd_stats, rd_stats_y,
-                rd_stats_uv, do_tx_search, is_comp_pred, inter_modes_info,
-                best_est_rd, ref_skip_rd, ref_frame_1, enable_tx_prune,
-                top_motion_mode_model_rd, mode_index, &ref_best_rd, num_planes,
-                mode_costs);
+                cpi, tile_data, x, bsize, rd_stats, rd_stats_y, rd_stats_uv,
+                do_tx_search, is_comp_pred, inter_modes_info, best_est_rd,
+                ref_skip_rd, ref_frame_1, enable_tx_prune,
+                top_motion_mode_model_rd, mode_index, &ref_best_rd);
             if (tx_ret == -1) return INT64_MAX;
             if (tx_ret == 0) continue;
 
@@ -4055,7 +4060,6 @@ static AVM_INLINE int prune_modes_based_on_tpl_stats(
     const FeatureFlags *const features,
     PruneInfoFromTpl *inter_cost_info_from_tpl, const MV_REFERENCE_FRAME *refs,
     int ref_mv_idx, const PREDICTION_MODE this_mode, int prune_mode_level) {
-  (void)features;
   const int have_newmv = have_newmv_in_inter_mode(this_mode);
   if ((prune_mode_level < 3) && have_newmv) return 0;
 
@@ -4733,12 +4737,14 @@ static AVM_INLINE void init_predictor_search_state(
 
 static AVM_INLINE void update_predictor_search_state(
     PredictorSearchState *search_state, int64_t tmp_rd, const AV2_COMMON *cm,
-    MACROBLOCK *x, const MB_MODE_INFO *mbmi, const RD_STATS *rd_stats,
-    const RD_STATS *rd_stats_y, const RD_STATS *rd_stats_uv,
-    const TxfmSearchInfo *txfm_info, BLOCK_SIZE bsize, int num_planes,
-    int tmp_rate_mv, int rate2_nocoeff,
-    motion_mode_candidate *motion_mode_cand) {
+    MACROBLOCK *x, const RD_STATS *rd_stats, const RD_STATS *rd_stats_y,
+    const RD_STATS *rd_stats_uv, BLOCK_SIZE bsize, int tmp_rate_mv,
+    int rate2_nocoeff, motion_mode_candidate *motion_mode_cand) {
   MACROBLOCKD *const xd = &x->e_mbd;
+  const MB_MODE_INFO *const mbmi = xd->mi[0];
+  const TxfmSearchInfo *const txfm_info = &x->txfm_search_info;
+  const int num_planes = av2_num_planes(cm);
+
   if (tmp_rd < *search_state->best_rd) {
     *search_state->best_rd_stats = *rd_stats;
     *search_state->best_rd_stats_y = *rd_stats_y;
@@ -4793,8 +4799,6 @@ static void evaluate_inter_predictor(AV2_COMP *const cpi,
   const int num_planes = it_ctx->num_planes;
   const int is_comp_pred = has_second_ref(mbmi);
   const int is_pb_mv_prec_active = is_pb_mv_precision_active(cm, mbmi, bsize);
-  TxfmSearchInfo *txfm_info = &x->txfm_search_info;
-
   *mbmi = it_ctx->base_mbmi;
   int_mv tmp_cur_mv[2];
   int i;
@@ -5006,10 +5010,9 @@ static void evaluate_inter_predictor(AV2_COMP *const cpi,
                             rd_stats_uv, refs, mbmi->mode, NULL, bsize, tmp_rd,
                             cpi->sf.winner_mode_sf.multi_winner_mode_type,
                             env->do_tx_search);
-    update_predictor_search_state(search_state, tmp_rd, cm, x, mbmi, rd_stats,
-                                  rd_stats_y, rd_stats_uv, txfm_info, bsize,
-                                  num_planes, tmp_rate_mv, rate2_nocoeff,
-                                  env->motion_mode_cand);
+    update_predictor_search_state(search_state, tmp_rd, cm, x, rd_stats,
+                                  rd_stats_y, rd_stats_uv, bsize, tmp_rate_mv,
+                                  rate2_nocoeff, env->motion_mode_cand);
 
     assert(check_mv_precision(cm, mbmi, x));
 
@@ -5161,8 +5164,7 @@ static int64_t handle_inter_mode(
     int offset = INTER_COMPOUND_OFFSET(this_mode);
     if (offset >= 0 && offset < INTER_COMPOUND_REF_TYPES) {
       optflow_mode = comp_idx_to_opfl_mode[offset];
-      if (optflow_mode != MODE_INVALID && optflow_mode != (PREDICTION_MODE)-1)
-        max_optflow = 2;
+      if (optflow_mode != MODE_INVALID) max_optflow = 2;
     }
   }
 
@@ -5581,7 +5583,7 @@ static int64_t handle_inter_mode(
           *mbmi = base_mbmi_single;
         }
       } else {
-        const int prediction_mode_cost =
+        int prediction_mode_cost =
             cost_prediction_mode(mode_costs, this_mode, cm, mbmi, xd, mode_ctx);
         const int base_rate = args->ref_frame_cost + args->single_comp_cost +
                               prediction_mode_cost;
@@ -9182,10 +9184,11 @@ typedef struct {
 } RefFramePair;
 
 static int av2_get_valid_ref_frame_pairs(const AV2_COMP *cpi, MACROBLOCK *x,
-                                         MACROBLOCKD *xd, BLOCK_SIZE bsize,
+                                         BLOCK_SIZE bsize,
                                          PREDICTION_MODE this_mode,
                                          RefFramePair *valid_pairs) {
   const AV2_COMMON *const cm = &cpi->common;
+  MACROBLOCKD *const xd = &x->e_mbd;
   int num_pairs = 0;
   for (MV_REFERENCE_FRAME rf = NONE_FRAME;
        rf < cm->ref_frames_info.num_total_refs + 1; ++rf) {
@@ -9553,8 +9556,8 @@ void av2_rd_pick_inter_mode_sb(struct AV2_COMP *cpi,
     }
 
     RefFramePair valid_pairs[REF_FRAMES * REF_FRAMES];
-    int num_pairs = av2_get_valid_ref_frame_pairs(cpi, x, xd, bsize, this_mode,
-                                                  valid_pairs);
+    int num_pairs =
+        av2_get_valid_ref_frame_pairs(cpi, x, bsize, this_mode, valid_pairs);
 
     for (int pair_idx = 0; pair_idx < num_pairs; ++pair_idx) {
       const MV_REFERENCE_FRAME ref_frame = valid_pairs[pair_idx].ref_frame;
