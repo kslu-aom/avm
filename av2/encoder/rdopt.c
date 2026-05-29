@@ -2711,6 +2711,112 @@ static int eval_warp_extend(const AV2_COMP *const cpi, MACROBLOCK *const x,
   return 1;
 }
 
+static void update_motion_mode_rate_costs(
+    const AV2_COMP *const cpi, MACROBLOCK *const x, MACROBLOCKD *const xd,
+    const AV2_COMMON *const cm, MB_MODE_INFO *mbmi, MB_MODE_INFO_EXT *mbmi_ext,
+    BLOCK_SIZE bsize, int mi_row, int mi_col, TxfmSearchInfo *txfm_info,
+    RD_STATS *rd_stats, int tmp_rate2, int switchable_rate,
+    int allowed_motion_modes) {
+  // Update rd_stats for the current motion mode
+  txfm_info->skip_txfm = 0;
+  rd_stats->dist = 0;
+  rd_stats->sse = 0;
+  rd_stats->skip_txfm = 1;
+  rd_stats->rate = tmp_rate2;
+  const ModeCosts *mode_costs = &x->mode_costs;
+  if (!is_warp_mode(mbmi->motion_mode)) rd_stats->rate += switchable_rate;
+
+  if (cm->features.enable_bawp && av2_allow_bawp(cm, mbmi, mi_row, mi_col)) {
+    rd_stats->rate += mode_costs->bawp_flg_cost[0][mbmi->bawp_flag[0] > 0];
+    const int ctx_index =
+        (mbmi->mode == NEARMV)
+            ? 0
+            : ((mbmi->mode == NEWMV && mbmi->use_amvd) ? 1 : 2);
+    if (mbmi->bawp_flag[0] > 0 && av2_allow_explicit_bawp(mbmi))
+      rd_stats->rate +=
+          mode_costs->explicit_bawp_cost[ctx_index][mbmi->bawp_flag[0] > 1];
+    if (mbmi->bawp_flag[0] > 1)
+      rd_stats->rate +=
+          mode_costs->explicit_bawp_scale_cost[mbmi->bawp_flag[0] - 2];
+  }
+  if (!cm->seq_params.monochrome && xd->is_chroma_ref && mbmi->bawp_flag[0]) {
+    rd_stats->rate += mode_costs->bawp_flg_cost[1][mbmi->bawp_flag[1] == 1];
+  }
+
+  MOTION_MODE motion_mode = mbmi->motion_mode;
+  bool continue_motion_mode_signaling =
+      (mbmi->mode != WARPMV && mbmi->mode != WARP_NEWMV);
+
+  if (continue_motion_mode_signaling &&
+      allowed_motion_modes & (1 << INTERINTRA)) {
+    rd_stats->rate += mode_costs->interintra_cost[size_group_lookup[bsize]]
+                                                 [motion_mode == INTERINTRA];
+    if (motion_mode == INTERINTRA) {
+      // Note(rachelbarker): Costs for other interintra-related
+      // signaling are already accounted for by
+      // `av2_handle_inter_intra_mode`
+      continue_motion_mode_signaling = false;
+    }
+  }
+
+  if (continue_motion_mode_signaling &&
+      allowed_motion_modes & (1 << WARP_CAUSAL)) {
+    const int ctx = av2_get_warp_causal_ctx(xd);
+    rd_stats->rate +=
+        mode_costs->warp_causal_cost[ctx][motion_mode == WARP_CAUSAL];
+  }
+
+  if (is_warp_newmv_allowed(cm, xd, mbmi, bsize) && mbmi->mode == WARP_NEWMV) {
+    continue_motion_mode_signaling =
+        (allowed_motion_modes & (1 << WARP_CAUSAL)) ||
+        (allowed_motion_modes & (1 << WARP_DELTA));
+
+    if (continue_motion_mode_signaling &&
+        (allowed_motion_modes & (1 << WARP_EXTEND))) {
+      const int ctx = av2_get_warp_extend_ctx(xd);
+      rd_stats->rate +=
+          mode_costs->warp_extend_cost[ctx][motion_mode == WARP_EXTEND];
+      if (motion_mode == WARP_EXTEND) {
+        continue_motion_mode_signaling = false;
+      }
+    }
+
+    if (continue_motion_mode_signaling &&
+        (allowed_motion_modes & (1 << WARP_DELTA)) &&
+        (allowed_motion_modes & (1 << WARP_CAUSAL))) {
+      const int ctx = av2_get_warp_causal_ctx(xd);
+      rd_stats->rate +=
+          mode_costs->warp_causal_cost[ctx][motion_mode == WARP_CAUSAL];
+    }
+  }
+
+  if (mbmi->mode == WARPMV) {
+    assert(motion_mode == WARP_DELTA);
+    if (allow_warpmv_with_mvd_coding(cm, mbmi)) {
+      rd_stats->rate +=
+          mode_costs->warpmv_with_mvd_flag_cost[mbmi->warpmv_with_mvd_flag];
+    }
+  }
+
+  if (motion_mode == WARP_DELTA ||
+      ((motion_mode == WARP_CAUSAL) && mbmi->mode == WARPMV)) {
+    rd_stats->rate += get_warp_ref_idx_cost(mbmi, x);
+
+    if (allow_warp_parameter_signaling(cm, mbmi)) {
+      rd_stats->rate += av2_cost_warp_delta(cm, xd, mbmi, mbmi_ext, mode_costs);
+    }
+
+    // The following line is commented out to remove a spurious
+    // static analysis warning. Uncomment when adding a new motion
+    // mode continue_motion_mode_signaling = false;
+  }
+
+  if (allow_warp_inter_intra(mbmi)) {
+    rd_stats->rate += mode_costs->warp_interintra_cost[size_group_lookup[bsize]]
+                                                      [mbmi->warp_inter_intra];
+  }
+}
+
 static int64_t motion_mode_rd(
     const AV2_COMP *const cpi, TileDataEnc *tile_data, MACROBLOCK *const x,
     BLOCK_SIZE bsize, RD_STATS *rd_stats, RD_STATS *rd_stats_y,
@@ -2950,118 +3056,12 @@ static int64_t motion_mode_rd(
             // the current mode
             if (!av2_check_newmv_joint_nonzero(cm, x)) continue;
 
-            // Update rd_stats for the current motion mode
-            txfm_info->skip_txfm = 0;
-            rd_stats->dist = 0;
-            rd_stats->sse = 0;
-            rd_stats->skip_txfm = 1;
-            rd_stats->rate = tmp_rate2;
+            update_motion_mode_rate_costs(cpi, x, xd, cm, mbmi, mbmi_ext, bsize,
+                                          mi_row, mi_col, txfm_info, rd_stats,
+                                          tmp_rate2, switchable_rate,
+                                          allowed_motion_modes);
+
             const ModeCosts *mode_costs = &x->mode_costs;
-            if (!is_warp_mode(mbmi->motion_mode))
-              rd_stats->rate += switchable_rate;
-
-            if (cm->features.enable_bawp &&
-                av2_allow_bawp(cm, mbmi, mi_row, mi_col)) {
-              rd_stats->rate +=
-                  mode_costs->bawp_flg_cost[0][mbmi->bawp_flag[0] > 0];
-              const int ctx_index =
-                  (mbmi->mode == NEARMV)
-                      ? 0
-                      : ((mbmi->mode == NEWMV && mbmi->use_amvd) ? 1 : 2);
-              if (mbmi->bawp_flag[0] > 0 && av2_allow_explicit_bawp(mbmi))
-                rd_stats->rate +=
-                    mode_costs
-                        ->explicit_bawp_cost[ctx_index][mbmi->bawp_flag[0] > 1];
-              if (mbmi->bawp_flag[0] > 1)
-                rd_stats->rate +=
-                    mode_costs
-                        ->explicit_bawp_scale_cost[mbmi->bawp_flag[0] - 2];
-            }
-            if (!cm->seq_params.monochrome && xd->is_chroma_ref &&
-                mbmi->bawp_flag[0]) {
-              rd_stats->rate +=
-                  mode_costs->bawp_flg_cost[1][mbmi->bawp_flag[1] == 1];
-            }
-
-            MOTION_MODE motion_mode = mbmi->motion_mode;
-            bool continue_motion_mode_signaling =
-                (mbmi->mode != WARPMV && mbmi->mode != WARP_NEWMV);
-
-            if (continue_motion_mode_signaling &&
-                allowed_motion_modes & (1 << INTERINTRA)) {
-              rd_stats->rate +=
-                  mode_costs->interintra_cost[size_group_lookup[bsize]]
-                                             [motion_mode == INTERINTRA];
-              if (motion_mode == INTERINTRA) {
-                // Note(rachelbarker): Costs for other interintra-related
-                // signaling are already accounted for by
-                // `av2_handle_inter_intra_mode`
-                continue_motion_mode_signaling = false;
-              }
-            }
-
-            if (continue_motion_mode_signaling &&
-                allowed_motion_modes & (1 << WARP_CAUSAL)) {
-              const int ctx = av2_get_warp_causal_ctx(xd);
-              rd_stats->rate +=
-                  mode_costs->warp_causal_cost[ctx][motion_mode == WARP_CAUSAL];
-            }
-
-            if (is_warp_newmv_allowed(cm, xd, mbmi, bsize) &&
-                mbmi->mode == WARP_NEWMV) {
-              continue_motion_mode_signaling =
-                  (allowed_motion_modes & (1 << WARP_CAUSAL)) ||
-                  (allowed_motion_modes & (1 << WARP_DELTA));
-
-              if (continue_motion_mode_signaling &&
-                  (allowed_motion_modes & (1 << WARP_EXTEND))) {
-                const int ctx = av2_get_warp_extend_ctx(xd);
-                rd_stats->rate +=
-                    mode_costs
-                        ->warp_extend_cost[ctx][motion_mode == WARP_EXTEND];
-                if (motion_mode == WARP_EXTEND) {
-                  continue_motion_mode_signaling = false;
-                }
-              }
-
-              if (continue_motion_mode_signaling &&
-                  (allowed_motion_modes & (1 << WARP_DELTA)) &&
-                  (allowed_motion_modes & (1 << WARP_CAUSAL))) {
-                const int ctx = av2_get_warp_causal_ctx(xd);
-                rd_stats->rate +=
-                    mode_costs
-                        ->warp_causal_cost[ctx][motion_mode == WARP_CAUSAL];
-              }
-            }
-
-            if (mbmi->mode == WARPMV) {
-              assert(motion_mode == WARP_DELTA);
-              if (allow_warpmv_with_mvd_coding(cm, mbmi)) {
-                rd_stats->rate +=
-                    mode_costs
-                        ->warpmv_with_mvd_flag_cost[mbmi->warpmv_with_mvd_flag];
-              }
-            }
-
-            if (motion_mode == WARP_DELTA ||
-                ((motion_mode == WARP_CAUSAL) && mbmi->mode == WARPMV)) {
-              rd_stats->rate += get_warp_ref_idx_cost(mbmi, x);
-
-              if (allow_warp_parameter_signaling(cm, mbmi)) {
-                rd_stats->rate +=
-                    av2_cost_warp_delta(cm, xd, mbmi, mbmi_ext, mode_costs);
-              }
-
-              // The following line is commented out to remove a spurious
-              // static analysis warning. Uncomment when adding a new motion
-              // mode continue_motion_mode_signaling = false;
-            }
-
-            if (allow_warp_inter_intra(mbmi)) {
-              rd_stats->rate +=
-                  mode_costs->warp_interintra_cost[size_group_lookup[bsize]]
-                                                  [mbmi->warp_inter_intra];
-            }
 
             if (!do_tx_search) {
               // Avoid doing a transform search here to speed up the overall
