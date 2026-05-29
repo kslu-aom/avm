@@ -2817,6 +2817,119 @@ static void update_motion_mode_rate_costs(
   }
 }
 
+static int estimate_or_search_tx(
+    const AV2_COMP *const cpi, TileDataEnc *tile_data, MACROBLOCK *const x,
+    MACROBLOCKD *const xd, const AV2_COMMON *const cm, MB_MODE_INFO *mbmi,
+    BLOCK_SIZE bsize, RD_STATS *rd_stats, RD_STATS *rd_stats_y,
+    RD_STATS *rd_stats_uv, int do_tx_search, int is_comp_pred,
+    InterModesInfo *inter_modes_info, int64_t *best_est_rd,
+    int64_t *ref_skip_rd, const MV_REFERENCE_FRAME ref_frame_1,
+    int enable_tx_prune, int64_t top_motion_mode_model_rd[], int mode_index,
+    int64_t *ref_best_rd, const int num_planes, const ModeCosts *mode_costs) {
+  if (!do_tx_search) {
+    // Avoid doing a transform search here to speed up the overall
+    // mode search. It will be done later in the mode search if the
+    // current motion mode seems promising.
+    int64_t curr_sse = -1;
+    int64_t sse_y = -1;
+    int est_residue_cost = 0;
+    int64_t est_dist = 0;
+    int64_t est_rd = 0;
+    if (cpi->sf.inter_sf.inter_mode_rd_model_estimation == 1) {
+      curr_sse = get_sse(cpi, x, &sse_y);
+      const int has_est_rd = get_est_rate_dist(tile_data, bsize, curr_sse,
+                                               &est_residue_cost, &est_dist);
+      (void)has_est_rd;
+      assert(has_est_rd);
+    } else if (cpi->sf.inter_sf.inter_mode_rd_model_estimation == 2) {
+      model_rd_sb_fn[MODELRD_TYPE_MOTION_MODE_RD](
+          cpi, bsize, x, xd, 0, num_planes - 1, &est_residue_cost, &est_dist,
+          NULL, &curr_sse, NULL, NULL, NULL);
+      sse_y = x->pred_sse[COMPACT_INDEX0_NRS(xd->mi[0]->ref_frame[0])];
+    }
+    est_rd = RDCOST(x->rdmult, rd_stats->rate + est_residue_cost, est_dist);
+    if (est_rd * 0.80 > *best_est_rd) {
+      mbmi->ref_frame[1] = ref_frame_1;
+      return 0;
+    }
+    const int mode_rate = rd_stats->rate;
+    rd_stats->rate += est_residue_cost;
+    rd_stats->dist = est_dist;
+    rd_stats->rdcost = est_rd;
+    if (rd_stats->rdcost < *best_est_rd) {
+      *best_est_rd = rd_stats->rdcost;
+      assert(sse_y >= 0);
+      ref_skip_rd[1] = cpi->sf.inter_sf.txfm_rd_gate_level
+                           ? RDCOST(x->rdmult, mode_rate, (sse_y << 4))
+                           : INT64_MAX;
+    }
+    if (cm->current_frame.reference_mode == SINGLE_REFERENCE) {
+      if (!is_comp_pred) {
+        assert(curr_sse >= 0);
+        inter_modes_info_push(inter_modes_info, mode_rate, curr_sse,
+                              rd_stats->rdcost, mbmi);
+      }
+    } else {
+      assert(curr_sse >= 0);
+      inter_modes_info_push(inter_modes_info, mode_rate, curr_sse,
+                            rd_stats->rdcost, mbmi);
+    }
+    mbmi->skip_txfm[xd->tree_type == CHROMA_PART] = 0;
+  } else {
+    // Perform full transform search
+    int64_t skip_rd = INT64_MAX;
+    int64_t skip_rdy = INT64_MAX;
+    if (cpi->sf.inter_sf.txfm_rd_gate_level) {
+      // Check if the mode is good enough based on skip RD
+      int64_t sse_y = INT64_MAX;
+      int64_t curr_sse = get_sse(cpi, x, &sse_y);
+      skip_rd = RDCOST(x->rdmult, rd_stats->rate, curr_sse);
+      skip_rdy = RDCOST(x->rdmult, rd_stats->rate, (sse_y << 4));
+      int eval_txfm = check_txfm_eval(x, bsize, ref_skip_rd[0], skip_rd,
+                                      cpi->sf.inter_sf.txfm_rd_gate_level, 0);
+      if (!eval_txfm) return 0;
+    }
+
+    if (enable_tx_prune) {
+      int est_residue_cost = 0;
+      int64_t est_dist = 0;
+      int64_t curr_sse = -1;
+      model_rd_sb_fn[MODELRD_TYPE_MOTION_MODE_RD](
+          cpi, bsize, x, xd, 0, num_planes - 1, &est_residue_cost, &est_dist,
+          NULL, &curr_sse, NULL, NULL, NULL);
+      int64_t est_rd =
+          RDCOST(x->rdmult, rd_stats->rate + est_residue_cost, est_dist);
+      if (prune_motion_mode(est_rd, top_motion_mode_model_rd)) return 0;
+    }
+
+    // Do transform search
+    if (!av2_txfm_search(cpi, x, bsize, rd_stats, rd_stats_y, rd_stats_uv,
+                         rd_stats->rate, enable_tx_prune ? 0 : 1,
+                         (*ref_best_rd))) {
+      if (rd_stats_y->rate == INT_MAX && mode_index == 0) {
+        return -1;
+      }
+      return 0;
+    }
+    const int64_t curr_rd = RDCOST(x->rdmult, rd_stats->rate, rd_stats->dist);
+    if (curr_rd < (*ref_best_rd)) {
+      (*ref_best_rd) = curr_rd;
+      ref_skip_rd[0] = skip_rd;
+      ref_skip_rd[1] = skip_rdy;
+    }
+    if (cpi->sf.inter_sf.inter_mode_rd_model_estimation == 1) {
+      const int skip_ctx = av2_get_skip_txfm_context(xd);
+      inter_mode_data_push(
+          tile_data, mbmi->sb_type[PLANE_TYPE_Y], rd_stats->sse, rd_stats->dist,
+          rd_stats_y->rate + rd_stats_uv->rate +
+              mode_costs->skip_txfm_cost
+                  [skip_ctx][mbmi->skip_txfm[xd->tree_type == CHROMA_PART]]);
+    }
+  }
+
+  return 1;
+}
+
 static int64_t motion_mode_rd(
     const AV2_COMP *const cpi, TileDataEnc *tile_data, MACROBLOCK *const x,
     BLOCK_SIZE bsize, RD_STATS *rd_stats, RD_STATS *rd_stats_y,
@@ -3063,114 +3176,14 @@ static int64_t motion_mode_rd(
 
             const ModeCosts *mode_costs = &x->mode_costs;
 
-            if (!do_tx_search) {
-              // Avoid doing a transform search here to speed up the overall
-              // mode search. It will be done later in the mode search if the
-              // current motion mode seems promising.
-              int64_t curr_sse = -1;
-              int64_t sse_y = -1;
-              int est_residue_cost = 0;
-              int64_t est_dist = 0;
-              int64_t est_rd = 0;
-              if (cpi->sf.inter_sf.inter_mode_rd_model_estimation == 1) {
-                curr_sse = get_sse(cpi, x, &sse_y);
-                const int has_est_rd = get_est_rate_dist(
-                    tile_data, bsize, curr_sse, &est_residue_cost, &est_dist);
-                (void)has_est_rd;
-                assert(has_est_rd);
-              } else if (cpi->sf.inter_sf.inter_mode_rd_model_estimation == 2) {
-                model_rd_sb_fn[MODELRD_TYPE_MOTION_MODE_RD](
-                    cpi, bsize, x, xd, 0, num_planes - 1, &est_residue_cost,
-                    &est_dist, NULL, &curr_sse, NULL, NULL, NULL);
-                sse_y =
-                    x->pred_sse[COMPACT_INDEX0_NRS(xd->mi[0]->ref_frame[0])];
-              }
-              est_rd = RDCOST(x->rdmult, rd_stats->rate + est_residue_cost,
-                              est_dist);
-              if (est_rd * 0.80 > *best_est_rd) {
-                mbmi->ref_frame[1] = ref_frame_1;
-                continue;
-              }
-              const int mode_rate = rd_stats->rate;
-              rd_stats->rate += est_residue_cost;
-              rd_stats->dist = est_dist;
-              rd_stats->rdcost = est_rd;
-              if (rd_stats->rdcost < *best_est_rd) {
-                *best_est_rd = rd_stats->rdcost;
-                assert(sse_y >= 0);
-                ref_skip_rd[1] =
-                    cpi->sf.inter_sf.txfm_rd_gate_level
-                        ? RDCOST(x->rdmult, mode_rate, (sse_y << 4))
-                        : INT64_MAX;
-              }
-              if (cm->current_frame.reference_mode == SINGLE_REFERENCE) {
-                if (!is_comp_pred) {
-                  assert(curr_sse >= 0);
-                  inter_modes_info_push(inter_modes_info, mode_rate, curr_sse,
-                                        rd_stats->rdcost, mbmi);
-                }
-              } else {
-                assert(curr_sse >= 0);
-                inter_modes_info_push(inter_modes_info, mode_rate, curr_sse,
-                                      rd_stats->rdcost, mbmi);
-              }
-              mbmi->skip_txfm[xd->tree_type == CHROMA_PART] = 0;
-            } else {
-              // Perform full transform search
-              int64_t skip_rd = INT64_MAX;
-              int64_t skip_rdy = INT64_MAX;
-              if (cpi->sf.inter_sf.txfm_rd_gate_level) {
-                // Check if the mode is good enough based on skip RD
-                int64_t sse_y = INT64_MAX;
-                int64_t curr_sse = get_sse(cpi, x, &sse_y);
-                skip_rd = RDCOST(x->rdmult, rd_stats->rate, curr_sse);
-                skip_rdy = RDCOST(x->rdmult, rd_stats->rate, (sse_y << 4));
-                int eval_txfm =
-                    check_txfm_eval(x, bsize, ref_skip_rd[0], skip_rd,
-                                    cpi->sf.inter_sf.txfm_rd_gate_level, 0);
-                if (!eval_txfm) continue;
-              }
-
-              if (enable_tx_prune) {
-                int est_residue_cost = 0;
-                int64_t est_dist = 0;
-                int64_t curr_sse = -1;
-                model_rd_sb_fn[MODELRD_TYPE_MOTION_MODE_RD](
-                    cpi, bsize, x, xd, 0, num_planes - 1, &est_residue_cost,
-                    &est_dist, NULL, &curr_sse, NULL, NULL, NULL);
-                int64_t est_rd = RDCOST(
-                    x->rdmult, rd_stats->rate + est_residue_cost, est_dist);
-                if (prune_motion_mode(est_rd, top_motion_mode_model_rd))
-                  continue;
-              }
-
-              // Do transform search
-              if (!av2_txfm_search(cpi, x, bsize, rd_stats, rd_stats_y,
-                                   rd_stats_uv, rd_stats->rate,
-                                   enable_tx_prune ? 0 : 1, ref_best_rd)) {
-                if (rd_stats_y->rate == INT_MAX && mode_index == 0) {
-                  return INT64_MAX;
-                }
-                continue;
-              }
-              const int64_t curr_rd =
-                  RDCOST(x->rdmult, rd_stats->rate, rd_stats->dist);
-              if (curr_rd < ref_best_rd) {
-                ref_best_rd = curr_rd;
-                ref_skip_rd[0] = skip_rd;
-                ref_skip_rd[1] = skip_rdy;
-              }
-              if (cpi->sf.inter_sf.inter_mode_rd_model_estimation == 1) {
-                const int skip_ctx = av2_get_skip_txfm_context(xd);
-                inter_mode_data_push(
-                    tile_data, mbmi->sb_type[PLANE_TYPE_Y], rd_stats->sse,
-                    rd_stats->dist,
-                    rd_stats_y->rate + rd_stats_uv->rate +
-                        mode_costs->skip_txfm_cost
-                            [skip_ctx]
-                            [mbmi->skip_txfm[xd->tree_type == CHROMA_PART]]);
-              }
-            }
+            const int tx_ret = estimate_or_search_tx(
+                cpi, tile_data, x, xd, cm, mbmi, bsize, rd_stats, rd_stats_y,
+                rd_stats_uv, do_tx_search, is_comp_pred, inter_modes_info,
+                best_est_rd, ref_skip_rd, ref_frame_1, enable_tx_prune,
+                top_motion_mode_model_rd, mode_index, &ref_best_rd, num_planes,
+                mode_costs);
+            if (tx_ret == -1) return INT64_MAX;
+            if (tx_ret == 0) continue;
 
             if (this_mode == GLOBALMV || this_mode == GLOBAL_GLOBALMV) {
               if (is_nontrans_global_motion(xd, xd->mi[0])) {
