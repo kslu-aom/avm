@@ -4768,77 +4768,86 @@ static int64_t handle_inter_mode(
       0;  // initialize to 0; later on the default value is assigned
   const int jmvd_scaling_factor_num =
       is_joint_mvd_coding_mode(mbmi->mode) ? JOINT_NEWMV_SCALE_FACTOR_CNT : 1;
-  for (int scale_index = 0; scale_index < jmvd_scaling_factor_num;
-       ++scale_index) {
-    mbmi->jmvd_scale_mode = scale_index;
-    if (is_joint_amvd_coding_mode(mbmi->mode, mbmi->use_amvd)) {
-      if (scale_index > JOINT_AMVD_SCALE_FACTOR_CNT - 1) continue;
-    }
-    if (cpi->sf.inter_sf.early_terminate_jmvd_scale_factor) {
-      if (scale_index > 0 && best_rd > 1.5 * ref_best_rd &&
-          (!is_inter_compound_mode(best_ref_mode)))
+
+  int best_cwp_idxs[JOINT_NEWMV_SCALE_FACTOR_CNT] = { CWP_EQUAL, CWP_EQUAL,
+                                                      CWP_EQUAL, CWP_EQUAL,
+                                                      CWP_EQUAL };
+  int64_t best_cwp_costs[JOINT_NEWMV_SCALE_FACTOR_CNT] = { INT64_MAX, INT64_MAX,
+                                                           INT64_MAX, INT64_MAX,
+                                                           INT64_MAX };
+
+  int ref_mv_idx[2];
+  const int total_ref_mv_idx = ref_set[1] * ref_set[0];
+  for (int flat_idx = 0; flat_idx < total_ref_mv_idx; ++flat_idx) {
+    ref_mv_idx[1] = flat_idx / ref_set[0];
+    ref_mv_idx[0] = flat_idx % ref_set[0];
+    if (mbmi->ref_frame[0] == mbmi->ref_frame[1] && mbmi->mode == NEAR_NEARMV &&
+        ref_mv_idx[0] >= ref_mv_idx[1])
+      continue;
+    mbmi->cwp_idx = CWP_EQUAL;
+    const int same_side = is_ref_frame_same_side(cm, mbmi);
+    int cwp_loop_num = cm->features.enable_cwp ? MAX_CWP_NUM : 1;
+
+    int cwp_search_mask[MAX_CWP_NUM] = { 0 };
+    av2_zero(cwp_search_mask);
+
+    // Initialize compound mode data
+    mbmi->interinter_comp.type = COMPOUND_AVERAGE;
+    mbmi->comp_group_idx = 0;
+    if (mbmi->ref_frame[1] == INTRA_FRAME) mbmi->ref_frame[1] = NONE_FRAME;
+
+    mbmi->num_proj_ref[0] = mbmi->num_proj_ref[1] = 0;
+    mbmi->motion_mode = SIMPLE_TRANSLATION;
+    mbmi->ref_mv_idx[1] = ref_mv_idx[1];
+    mbmi->ref_mv_idx[0] = ref_mv_idx[0];
+    int ref_mv_idx_type = av2_ref_mv_idx_type(mbmi, ref_mv_idx);
+    set_mv_precision(mbmi, mbmi->max_mv_precision);
+    if (mbmi->mode != WARPMV && prune_modes_based_on_tpl &&
+        !ref_match_found_in_above_nb && !ref_match_found_in_left_nb &&
+        (ref_best_rd != INT64_MAX)) {
+      // Skip mode if TPL model indicates it will not be beneficial.
+      if (prune_modes_based_on_tpl_stats(
+              &cm->features, inter_cost_info_from_tpl, refs, ref_mv_idx[0],
+              this_mode, cpi->sf.inter_sf.prune_inter_modes_based_on_tpl))
         continue;
     }
-    int best_cwp_idx = CWP_EQUAL;
-    int64_t best_cwp_cost = INT64_MAX;
+    const int drl_cost =
+        get_drl_cost(cm->features.max_drl_bits, mbmi, mbmi_ext, x);
 
-    int ref_mv_idx[2];
-    const int total_ref_mv_idx = ref_set[1] * ref_set[0];
-    for (int flat_idx = 0; flat_idx < total_ref_mv_idx; ++flat_idx) {
-      ref_mv_idx[1] = flat_idx / ref_set[0];
-      ref_mv_idx[0] = flat_idx % ref_set[0];
-      // apply early termination method to jmvd scaling factors
-      if (cpi->sf.inter_sf.early_terminate_jmvd_scale_factor) {
-        if (scale_index > 0 && (ref_mv_idx[0] > 0 || ref_mv_idx[1] > 0) &&
-            best_mbmi.jmvd_scale_mode == 0 &&
-            (best_mbmi.ref_mv_idx[0] < ref_mv_idx[0] ||
-             best_mbmi.ref_mv_idx[1] < ref_mv_idx[1]))
-          continue;
-      }
-      if (mbmi->ref_frame[0] == mbmi->ref_frame[1] &&
-          mbmi->mode == NEAR_NEARMV && ref_mv_idx[0] >= ref_mv_idx[1])
-        continue;
-      mbmi->cwp_idx = CWP_EQUAL;
-      const int same_side = is_ref_frame_same_side(cm, mbmi);
-      int cwp_loop_num = cm->features.enable_cwp ? MAX_CWP_NUM : 1;
-      if (best_cwp_idx == CWP_EQUAL && (ref_mv_idx[0] > 0 || ref_mv_idx[1] > 0))
-        cwp_loop_num = 1;
+    MvSubpelPrecision best_precision_so_far = mbmi->max_mv_precision;
+    int64_t best_precision_rd_so_far = INT64_MAX;
+    set_precision_set(cm, xd, mbmi, bsize, ref_mv_idx);
+    set_most_probable_mv_precision(cm, mbmi, bsize);
+    const PRECISION_SET *precision_def =
+        &av2_mv_precision_sets[mbmi->mb_precision_set];
+    int best_precision_dx_so_far = precision_def->num_precisions;
+    for (int precision_dx = precision_def->num_precisions - 1;
+         precision_dx >= 0; precision_dx--) {
+      for (int scale_index = 0; scale_index < jmvd_scaling_factor_num;
+           ++scale_index) {
+        mbmi->jmvd_scale_mode = scale_index;
+        if (is_joint_amvd_coding_mode(mbmi->mode, mbmi->use_amvd)) {
+          if (scale_index > JOINT_AMVD_SCALE_FACTOR_CNT - 1) continue;
+        }
+        if (cpi->sf.inter_sf.early_terminate_jmvd_scale_factor) {
+          if (scale_index > 0 && best_rd > 1.5 * ref_best_rd &&
+              (!is_inter_compound_mode(best_ref_mode)))
+            continue;
+        }
+        // apply early termination method to jmvd scaling factors
+        if (cpi->sf.inter_sf.early_terminate_jmvd_scale_factor) {
+          if (scale_index > 0 && (ref_mv_idx[0] > 0 || ref_mv_idx[1] > 0) &&
+              best_mbmi.jmvd_scale_mode == 0 &&
+              (best_mbmi.ref_mv_idx[0] < ref_mv_idx[0] ||
+               best_mbmi.ref_mv_idx[1] < ref_mv_idx[1]))
+            continue;
+        }
 
-      int cwp_search_mask[MAX_CWP_NUM] = { 0 };
-      av2_zero(cwp_search_mask);
+        cwp_loop_num = cm->features.enable_cwp ? MAX_CWP_NUM : 1;
+        if (best_cwp_idxs[scale_index] == CWP_EQUAL &&
+            (ref_mv_idx[0] > 0 || ref_mv_idx[1] > 0))
+          cwp_loop_num = 1;
 
-      // Initialize compound mode data
-      mbmi->interinter_comp.type = COMPOUND_AVERAGE;
-      mbmi->comp_group_idx = 0;
-      if (mbmi->ref_frame[1] == INTRA_FRAME) mbmi->ref_frame[1] = NONE_FRAME;
-
-      mbmi->num_proj_ref[0] = mbmi->num_proj_ref[1] = 0;
-      mbmi->motion_mode = SIMPLE_TRANSLATION;
-      mbmi->ref_mv_idx[1] = ref_mv_idx[1];
-      mbmi->ref_mv_idx[0] = ref_mv_idx[0];
-      int ref_mv_idx_type = av2_ref_mv_idx_type(mbmi, ref_mv_idx);
-      set_mv_precision(mbmi, mbmi->max_mv_precision);
-      if (mbmi->mode != WARPMV && prune_modes_based_on_tpl &&
-          !ref_match_found_in_above_nb && !ref_match_found_in_left_nb &&
-          (ref_best_rd != INT64_MAX)) {
-        // Skip mode if TPL model indicates it will not be beneficial.
-        if (prune_modes_based_on_tpl_stats(
-                &cm->features, inter_cost_info_from_tpl, refs, ref_mv_idx[0],
-                this_mode, cpi->sf.inter_sf.prune_inter_modes_based_on_tpl))
-          continue;
-      }
-      const int drl_cost =
-          get_drl_cost(cm->features.max_drl_bits, mbmi, mbmi_ext, x);
-
-      MvSubpelPrecision best_precision_so_far = mbmi->max_mv_precision;
-      int64_t best_precision_rd_so_far = INT64_MAX;
-      set_precision_set(cm, xd, mbmi, bsize, ref_mv_idx);
-      set_most_probable_mv_precision(cm, mbmi, bsize);
-      const PRECISION_SET *precision_def =
-          &av2_mv_precision_sets[mbmi->mb_precision_set];
-      int best_precision_dx_so_far = precision_def->num_precisions;
-      for (int precision_dx = precision_def->num_precisions - 1;
-           precision_dx >= 0; precision_dx--) {
         for (int cwp_search_idx = 0; cwp_search_idx < cwp_loop_num;
              cwp_search_idx++) {
           mbmi->cwp_idx = cwp_weighting_factor[same_side][cwp_search_idx];
@@ -5321,9 +5330,9 @@ static int64_t handle_inter_mode(
                 assert(check_mv_precision(cm, mbmi, x));
 
                 if (is_cwp_allowed(mbmi)) {
-                  if (tmp_rd < best_cwp_cost) {
-                    best_cwp_cost = tmp_rd;
-                    best_cwp_idx = mbmi->cwp_idx;
+                  if (tmp_rd < best_cwp_costs[scale_index]) {
+                    best_cwp_costs[scale_index] = tmp_rd;
+                    best_cwp_idxs[scale_index] = mbmi->cwp_idx;
                   }
                 }
                 if (tmp_rd < ref_best_rd) {
