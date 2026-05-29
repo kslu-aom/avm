@@ -4806,59 +4806,52 @@ static int64_t handle_inter_mode(
 
       int cwp_search_mask[MAX_CWP_NUM] = { 0 };
       av2_zero(cwp_search_mask);
-      // Loop all supported weighting factors for CWP
-      for (int cwp_search_idx = 0; cwp_search_idx < cwp_loop_num;
-           cwp_search_idx++) {
-        mbmi->ref_mv_idx[1] = ref_mv_idx[1];
-        mbmi->ref_mv_idx[0] = ref_mv_idx[0];
-        mbmi->interinter_comp.type = COMPOUND_AVERAGE;
-        mbmi->comp_group_idx = 0;
-        mbmi->motion_mode = SIMPLE_TRANSLATION;
 
-        mbmi->cwp_idx = cwp_weighting_factor[same_side][cwp_search_idx];
+      // Initialize compound mode data
+      mbmi->interinter_comp.type = COMPOUND_AVERAGE;
+      mbmi->comp_group_idx = 0;
+      if (mbmi->ref_frame[1] == INTRA_FRAME) mbmi->ref_frame[1] = NONE_FRAME;
 
-        if (mbmi->cwp_idx != CWP_EQUAL) {
-          if (!is_cwp_allowed(mbmi)) break;
-          if (cwp_search_mask[cwp_search_idx] == 0) {
-            continue;
+      mbmi->num_proj_ref[0] = mbmi->num_proj_ref[1] = 0;
+      mbmi->motion_mode = SIMPLE_TRANSLATION;
+      mbmi->ref_mv_idx[1] = ref_mv_idx[1];
+      mbmi->ref_mv_idx[0] = ref_mv_idx[0];
+      int ref_mv_idx_type = av2_ref_mv_idx_type(mbmi, ref_mv_idx);
+      set_mv_precision(mbmi, mbmi->max_mv_precision);
+      if (mbmi->mode != WARPMV && prune_modes_based_on_tpl &&
+          !ref_match_found_in_above_nb && !ref_match_found_in_left_nb &&
+          (ref_best_rd != INT64_MAX)) {
+        // Skip mode if TPL model indicates it will not be beneficial.
+        if (prune_modes_based_on_tpl_stats(
+                &cm->features, inter_cost_info_from_tpl, refs, ref_mv_idx[0],
+                this_mode, cpi->sf.inter_sf.prune_inter_modes_based_on_tpl))
+          continue;
+      }
+      const int drl_cost =
+          get_drl_cost(cm->features.max_drl_bits, mbmi, mbmi_ext, x);
+
+      MvSubpelPrecision best_precision_so_far = mbmi->max_mv_precision;
+      int64_t best_precision_rd_so_far = INT64_MAX;
+      set_precision_set(cm, xd, mbmi, bsize, ref_mv_idx);
+      set_most_probable_mv_precision(cm, mbmi, bsize);
+      const PRECISION_SET *precision_def =
+          &av2_mv_precision_sets[mbmi->mb_precision_set];
+      int best_precision_dx_so_far = precision_def->num_precisions;
+      for (int precision_dx = precision_def->num_precisions - 1;
+           precision_dx >= 0; precision_dx--) {
+        for (int cwp_search_idx = 0; cwp_search_idx < cwp_loop_num;
+             cwp_search_idx++) {
+          mbmi->cwp_idx = cwp_weighting_factor[same_side][cwp_search_idx];
+
+          if (mbmi->cwp_idx != CWP_EQUAL) {
+            if (!is_cwp_allowed(mbmi)) break;
+            if (cwp_search_mask[cwp_search_idx] == 0) {
+              continue;
+            }
           }
-        }
-        if (mbmi->cwp_idx == -1) {
-          break;
-        }
-
-        // Initialize compound mode data
-        mbmi->interinter_comp.type = COMPOUND_AVERAGE;
-        mbmi->comp_group_idx = 0;
-        if (mbmi->ref_frame[1] == INTRA_FRAME) mbmi->ref_frame[1] = NONE_FRAME;
-
-        mbmi->num_proj_ref[0] = mbmi->num_proj_ref[1] = 0;
-        mbmi->motion_mode = SIMPLE_TRANSLATION;
-        mbmi->ref_mv_idx[1] = ref_mv_idx[1];
-        mbmi->ref_mv_idx[0] = ref_mv_idx[0];
-        int ref_mv_idx_type = av2_ref_mv_idx_type(mbmi, ref_mv_idx);
-        set_mv_precision(mbmi, mbmi->max_mv_precision);
-        if (mbmi->mode != WARPMV && prune_modes_based_on_tpl &&
-            !ref_match_found_in_above_nb && !ref_match_found_in_left_nb &&
-            (ref_best_rd != INT64_MAX)) {
-          // Skip mode if TPL model indicates it will not be beneficial.
-          if (prune_modes_based_on_tpl_stats(
-                  &cm->features, inter_cost_info_from_tpl, refs, ref_mv_idx[0],
-                  this_mode, cpi->sf.inter_sf.prune_inter_modes_based_on_tpl))
-            continue;
-        }
-        const int drl_cost =
-            get_drl_cost(cm->features.max_drl_bits, mbmi, mbmi_ext, x);
-
-        MvSubpelPrecision best_precision_so_far = mbmi->max_mv_precision;
-        int64_t best_precision_rd_so_far = INT64_MAX;
-        set_precision_set(cm, xd, mbmi, bsize, ref_mv_idx);
-        set_most_probable_mv_precision(cm, mbmi, bsize);
-        const PRECISION_SET *precision_def =
-            &av2_mv_precision_sets[mbmi->mb_precision_set];
-        int best_precision_dx_so_far = precision_def->num_precisions;
-        for (int precision_dx = precision_def->num_precisions - 1;
-             precision_dx >= 0; precision_dx--) {
+          if (mbmi->cwp_idx == -1) {
+            break;
+          }
           MvSubpelPrecision pb_mv_precision =
               precision_def->precision[precision_dx];
           mbmi->pb_mv_precision = pb_mv_precision;
