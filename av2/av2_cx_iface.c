@@ -120,6 +120,8 @@ struct av2_extracfg {
   unsigned int erp_pruning_level;
   int use_ml_erp_pruning;
   unsigned int enable_ext_partitions;
+  int enable_tx_4way;
+  int enable_tx_5way;
   unsigned int enable_tx_partition;
   int enable_rect_partitions;  // enable rectangular partitions for sequence
   int enable_uneven_4way_partitions;  // enable 1:2:4:1 and 1:4:2:1 partitions
@@ -454,6 +456,8 @@ static struct av2_extracfg default_extra_cfg = {
   5,                            // aggressiveness for erp pruning
   2,                            // use ml model for erp pruning
   1,                            // enable extended partitions
+  1,                            // enable_tx_4way
+  1,                            // enable_tx_5way
   1,                            // enable txfm partition
   1,                            // enable rectangular partitions
   1,                            // enable 1:4 and 4:1 partitions
@@ -1684,6 +1688,8 @@ static avm_codec_err_t set_encoder_config(AV2EncoderConfig *oxcf,
   txfm_cfg->use_intra_default_tx_only = extra_cfg->use_intra_default_tx_only;
   txfm_cfg->disable_ml_transform_speed_features =
       extra_cfg->disable_ml_transform_speed_features;
+  txfm_cfg->enable_tx_4way = extra_cfg->enable_tx_4way;
+  txfm_cfg->enable_tx_5way = extra_cfg->enable_tx_5way;
   txfm_cfg->enable_tx_partition = extra_cfg->enable_tx_partition;
   txfm_cfg->enable_ist = extra_cfg->enable_ist && !extra_cfg->lossless;
   txfm_cfg->enable_inter_ist =
@@ -4143,6 +4149,12 @@ static avm_codec_err_t encoder_set_option(avm_codec_alg_priv_t *ctx,
                                   argv, err_string)) {
     extra_cfg.enable_ext_partitions =
         avm_arg_parse_int_helper(&arg, err_string);
+  } else if (avm_arg_match_helper(&arg, &g_av2_codec_arg_defs.enable_tx_4way,
+                                  argv, err_string)) {
+    extra_cfg.enable_tx_4way = avm_arg_parse_int_helper(&arg, err_string);
+  } else if (avm_arg_match_helper(&arg, &g_av2_codec_arg_defs.enable_tx_5way,
+                                  argv, err_string)) {
+    extra_cfg.enable_tx_5way = avm_arg_parse_int_helper(&arg, err_string);
   } else if (avm_arg_match_helper(&arg,
                                   &g_av2_codec_arg_defs.enable_tx_partition,
                                   argv, err_string)) {

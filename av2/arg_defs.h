@@ -147,6 +147,8 @@ typedef struct av2_codec_arg_definitions {
   arg_def_t erp_pruning_level;
   arg_def_t use_ml_erp_pruning;
   arg_def_t enable_ext_partitions;
+  arg_def_t enable_tx_4way;
+  arg_def_t enable_tx_5way;
   arg_def_t enable_tx_partition;
   arg_def_t enable_rect_partitions;
   arg_def_t enable_uneven_4way_partitions;

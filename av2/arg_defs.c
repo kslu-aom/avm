@@ -397,6 +397,14 @@ const av2_codec_arg_definitions_t g_av2_codec_arg_defs = {
   .enable_ext_partitions = ARG_DEF(NULL, "enable-ext-partitions", 1,
                                    "Enable extended partitions "
                                    "(0: false, 1: true (default))."),
+  .enable_tx_4way =
+      ARG_DEF(NULL, "enable-tx-4way", 1,
+              "Enable 4way TX block partition. 1: for all blocks; 2: for inter "
+              "blocks only; 3: for intra blocks only"),
+  .enable_tx_5way =
+      ARG_DEF(NULL, "enable-tx-5way", 1,
+              "Enable 5way TX block partition. 1: for all blocks; 2: for inter "
+              "blocks only; 3: for intra blocks only"),
   .enable_tx_partition = ARG_DEF(NULL, "enable-tx-partition", 1,
                                  "Enable txfm partitions "
                                  "(0: false, 1: true (default))."),

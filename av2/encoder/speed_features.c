@@ -786,6 +786,8 @@ static AVM_INLINE void init_tx_sf(TX_SPEED_FEATURES *tx_sf) {
   tx_sf->use_largest_tx_size_for_small_bsize = false;
   tx_sf->restrict_tx_partition_type_search = 0;
   tx_sf->prune_inter_tx_part_rd_eval = false;
+  tx_sf->enable_tx_4way = 1;
+  tx_sf->enable_tx_5way = 1;
   tx_sf->enable_tx_partition = true;
 }
 
@@ -1048,6 +1050,8 @@ void av2_set_speed_features_framesize_independent(AV2_COMP *cpi, int speed) {
     set_good_speed_features_framesize_independent(cpi, sf, speed);
 
   sf->inter_sf.max_comp_refs = oxcf->comp_type_cfg.max_comp_refs;
+  sf->tx_sf.enable_tx_4way = oxcf->txfm_cfg.enable_tx_4way;
+  sf->tx_sf.enable_tx_5way = oxcf->txfm_cfg.enable_tx_5way;
 
   if (!cpi->seq_params_locked) {
     cpi->common.seq_params.enable_restoration &= !sf->lpf_sf.disable_lr_filter;

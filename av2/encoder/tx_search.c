@@ -3050,6 +3050,25 @@ static void select_tx_partition_type(
     if (!use_tx_partition(type, plane_bsize, max_tx_size)) continue;
     if (cpi->sf.tx_sf.enable_tx_partition == false && type) continue;
 
+    if (type == TX_PARTITION_HORZ4 || type == TX_PARTITION_VERT4) {
+      if (cpi->sf.tx_sf.enable_tx_4way == 0) {
+        continue;
+      } else if (cpi->sf.tx_sf.enable_tx_4way == 2) {
+        if (!is_inter_block(mbmi, xd->tree_type)) continue;
+      } else if (cpi->sf.tx_sf.enable_tx_4way == 3) {
+        if (is_inter_block(mbmi, xd->tree_type)) continue;
+      }
+    }
+    if (type == TX_PARTITION_HORZ5 || type == TX_PARTITION_VERT5) {
+      if (cpi->sf.tx_sf.enable_tx_5way == 0) {
+        continue;
+      } else if (cpi->sf.tx_sf.enable_tx_5way == 2) {
+        if (!is_inter_block(mbmi, xd->tree_type)) continue;
+      } else if (cpi->sf.tx_sf.enable_tx_5way == 3) {
+        if (is_inter_block(mbmi, xd->tree_type)) continue;
+      }
+    }
+
     if ((type == TX_PARTITION_HORZ4 &&
          best_tx_partition == TX_PARTITION_VERT) ||
         (type == TX_PARTITION_VERT4 &&
@@ -3363,6 +3382,25 @@ static void choose_tx_size_type_from_rd(const AV2_COMP *const cpi,
     // Skip any illegal partitions for this block size
     if (!use_tx_partition(type, bs, max_tx_size)) continue;
     if (cpi->sf.tx_sf.enable_tx_partition == false && type) continue;
+
+    if (type == TX_PARTITION_HORZ4 || type == TX_PARTITION_VERT4) {
+      if (cpi->sf.tx_sf.enable_tx_4way == 0) {
+        continue;
+      } else if (cpi->sf.tx_sf.enable_tx_4way == 2) {
+        if (!is_inter_block(mbmi, xd->tree_type)) continue;
+      } else if (cpi->sf.tx_sf.enable_tx_4way == 3) {
+        if (is_inter_block(mbmi, xd->tree_type)) continue;
+      }
+    }
+    if (type == TX_PARTITION_HORZ5 || type == TX_PARTITION_VERT5) {
+      if (cpi->sf.tx_sf.enable_tx_5way == 0) {
+        continue;
+      } else if (cpi->sf.tx_sf.enable_tx_5way == 2) {
+        if (!is_inter_block(mbmi, xd->tree_type)) continue;
+      } else if (cpi->sf.tx_sf.enable_tx_5way == 3) {
+        if (is_inter_block(mbmi, xd->tree_type)) continue;
+      }
+    }
 
     mbmi->tx_partition_type[0] = type;
     get_tx_partition_sizes(type, max_tx_size, &mbmi->txb_pos, mbmi->sub_txs,

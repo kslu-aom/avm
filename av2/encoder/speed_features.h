@@ -815,6 +815,14 @@ typedef struct TX_SPEED_FEATURES {
   // partition of inter modes that are evaluated so far
   bool prune_inter_tx_part_rd_eval;
 
+  // Enable 4way transform partition search
+  // 0: disable; 1: enable for all; 2: inter only; 3: intra only.
+  int enable_tx_4way;
+
+  // Enable 5way transform partition search
+  // 0: disable; 1: enable for all; 2: inter only; 3: intra only.
+  int enable_tx_5way;
+
   // Enable txfm partition search
   bool enable_tx_partition;
 } TX_SPEED_FEATURES;

@@ -332,6 +332,8 @@ const arg_def_t *av2_key_val_args[] = {
   &g_av2_codec_arg_defs.enable_tip_refinemv,
   &g_av2_codec_arg_defs.enable_tpl_model,
   &g_av2_codec_arg_defs.enable_trellis_quant,
+  &g_av2_codec_arg_defs.enable_tx_4way,
+  &g_av2_codec_arg_defs.enable_tx_5way,
   &g_av2_codec_arg_defs.enable_tx_partition,
   &g_av2_codec_arg_defs.enable_uneven_4way_partitions,
   &g_av2_codec_arg_defs.enable_warp_causal,

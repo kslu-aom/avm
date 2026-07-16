@@ -305,6 +305,16 @@ typedef struct {
    */
   bool disable_ml_transform_speed_features;
   /*!
+   * Flag to enable 4way TX block partition.
+   * 0: disable; 1: enable for all; 2: inter only; 3: intra only.
+   */
+  int enable_tx_4way;
+  /*!
+   * Flag to enable 5way TX block partition.
+   * 0: disable; 1: enable for all; 2: inter only; 3: intra only.
+   */
+  int enable_tx_5way;
+  /*!
    * Flag to enable txfm partition.
    */
   bool enable_tx_partition;
