@@ -954,6 +954,8 @@ typedef struct {
   avm_opfl_refine_type enable_opfl_refine;
   // Bitmask to disable optical flow for prediction modes
   int opfl_mode_mask;
+  // Indicates if switchable DMVR should be disabled
+  int dis_switchable_dmvr;
   // Indicates if BRU is enabled and the mode
   unsigned int enable_bru;
   bool disable_loopfilters_across_tiles;

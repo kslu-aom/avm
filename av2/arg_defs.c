@@ -842,6 +842,8 @@ const av2_codec_arg_definitions_t g_av2_codec_arg_defs = {
               "Max number of compound references (0: search all, default: 0)"),
   .opfl_mode_mask = ARG_DEF(NULL, "opfl-mode-mask", 1,
                             "Disable OPFL for some prediction modes"),
+  .dis_switchable_dmvr = ARG_DEF(NULL, "dis-switchable-dmvr", 1,
+                                 "Disable DMVR for switchable blocks"),
 
   .enable_refmvbank = ARG_DEF(NULL, "enable-refmvbank", 1,
                               "Enable reference MV bank (0: false "

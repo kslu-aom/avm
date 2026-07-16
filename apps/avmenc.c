@@ -259,6 +259,7 @@ const arg_def_t *av2_key_val_args[] = {
   &g_av2_codec_arg_defs.disable_loopfilters_across_tiles,
   &g_av2_codec_arg_defs.disable_ml_partition_speed_features,
   &g_av2_codec_arg_defs.disable_ml_transform_speed_features,
+  &g_av2_codec_arg_defs.dis_switchable_dmvr,
   &g_av2_codec_arg_defs.dpb_size,
   &g_av2_codec_arg_defs.enable_adaptive_mvd,
   &g_av2_codec_arg_defs.enable_angle_delta,

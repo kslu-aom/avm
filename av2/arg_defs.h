@@ -271,6 +271,7 @@ typedef struct av2_codec_arg_definitions {
   arg_def_t max_drl_refbvs;
   arg_def_t max_comp_refs;
   arg_def_t opfl_mode_mask;
+  arg_def_t dis_switchable_dmvr;
   arg_def_t enable_refmvbank;
   arg_def_t enable_drl_reorder;
   arg_def_t enable_cdef_on_skip_txfm;

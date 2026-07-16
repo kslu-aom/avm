@@ -706,6 +706,7 @@ static AVM_INLINE void init_inter_sf(INTER_MODE_SPEED_FEATURES *inter_sf) {
   inter_sf->alt_ref_search_fp = 0;
   inter_sf->max_comp_refs = 0;
   inter_sf->opfl_mode_mask = 0;
+  inter_sf->dis_switchable_dmvr = 0;
   inter_sf->selective_ref_frame = 0;
   inter_sf->prune_newmv_modes_using_prior_rd = 0;
   inter_sf->share_motion_mode_prune_pool = 0;
@@ -1052,6 +1053,7 @@ void av2_set_speed_features_framesize_independent(AV2_COMP *cpi, int speed) {
 
   sf->inter_sf.max_comp_refs = oxcf->comp_type_cfg.max_comp_refs;
   sf->inter_sf.opfl_mode_mask = oxcf->tool_cfg.opfl_mode_mask;
+  sf->inter_sf.dis_switchable_dmvr = oxcf->tool_cfg.dis_switchable_dmvr;
   sf->tx_sf.enable_tx_4way = oxcf->txfm_cfg.enable_tx_4way;
   sf->tx_sf.enable_tx_5way = oxcf->txfm_cfg.enable_tx_5way;
 

@@ -570,6 +570,9 @@ typedef struct INTER_MODE_SPEED_FEATURES {
   // Bitmask to disable optical flow for prediction modes (0: search all).
   int opfl_mode_mask;
 
+  // Disable DMVR for switchable blocks
+  int dis_switchable_dmvr;
+
   // flag to skip NEWMV mode in drl if the motion search result is the same
   int skip_repeated_newmv;
 
