@@ -356,6 +356,7 @@ const arg_def_t *av2_key_val_args[] = {
   &g_av2_codec_arg_defs.input_matrix_coefficients,
   &g_av2_codec_arg_defs.input_transfer_characteristics,
   &g_av2_codec_arg_defs.lossless,
+  &g_av2_codec_arg_defs.max_comp_refs,
   &g_av2_codec_arg_defs.max_drl_refbvs,
   &g_av2_codec_arg_defs.max_drl_refmvs,
   &g_av2_codec_arg_defs.max_gf_interval,

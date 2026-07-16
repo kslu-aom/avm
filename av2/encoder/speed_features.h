@@ -564,6 +564,9 @@ typedef struct INTER_MODE_SPEED_FEATURES {
   // Prune reference frames for ALTREF
   int alt_ref_search_fp;
 
+  // Max compound reference frame combinations (0: search all).
+  int max_comp_refs;
+
   // flag to skip NEWMV mode in drl if the motion search result is the same
   int skip_repeated_newmv;
 

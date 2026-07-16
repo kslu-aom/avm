@@ -9093,6 +9093,25 @@ void av2_rd_pick_inter_mode_sb(struct AV2_COMP *cpi,
 
     if (comp_pred && !(cm->ref_frame_flags & (1 << second_ref_frame))) continue;
 
+    if (comp_pred && cpi->sf.inter_sf.max_comp_refs &&
+        ref_frame != second_ref_frame) {
+      static const int comp_ref_priority[][2] = {
+        // Ordered based on selection frequency
+        { 0, 1 }, { 0, 2 }, { 0, 3 }, { 1, 2 }, { 0, 4 },
+        { 0, 5 }, { 2, 3 }, { 1, 4 }, { 1, 3 }, { 1, 5 },
+        { 2, 5 }, { 0, 6 }, { 1, 6 }, { 2, 4 }, { 2, 6 },
+      };
+      bool found = false;
+      for (int i = 0; i < cpi->sf.inter_sf.max_comp_refs; ++i) {
+        if (comp_ref_priority[i][0] == ref_frame &&
+            comp_ref_priority[i][1] == second_ref_frame) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) continue;
+    }
+
     const MV_REFERENCE_FRAME ref_frames[2] = { ref_frame, second_ref_frame };
     init_mbmi(mbmi, this_mode, ref_frames, cm, xd, xd->sbi);
     mbmi->fsc_mode[PLANE_TYPE_Y] = 0;

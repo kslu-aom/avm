@@ -704,6 +704,7 @@ static AVM_INLINE void init_inter_sf(INTER_MODE_SPEED_FEATURES *inter_sf) {
   inter_sf->model_based_post_interp_filter_breakout = 0;
   inter_sf->reduce_inter_modes = 0;
   inter_sf->alt_ref_search_fp = 0;
+  inter_sf->max_comp_refs = 0;
   inter_sf->selective_ref_frame = 0;
   inter_sf->prune_newmv_modes_using_prior_rd = 0;
   inter_sf->share_motion_mode_prune_pool = 0;
@@ -1045,6 +1046,8 @@ void av2_set_speed_features_framesize_independent(AV2_COMP *cpi, int speed) {
 
   if (oxcf->mode == GOOD)
     set_good_speed_features_framesize_independent(cpi, sf, speed);
+
+  sf->inter_sf.max_comp_refs = oxcf->comp_type_cfg.max_comp_refs;
 
   if (!cpi->seq_params_locked) {
     cpi->common.seq_params.enable_restoration &= !sf->lpf_sf.disable_lr_filter;

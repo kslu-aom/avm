@@ -384,6 +384,10 @@ typedef struct {
    * Flag to indicate if inter-intra wedge compound type should be enabled.
    */
   bool enable_interintra_wedge;
+  /*!
+   * Maximum number of compound reference frame combinations tested.
+   */
+  int max_comp_refs;
 } CompoundTypeCfg;
 
 /*!
