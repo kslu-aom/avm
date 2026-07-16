@@ -567,6 +567,9 @@ typedef struct INTER_MODE_SPEED_FEATURES {
   // Max compound reference frame combinations (0: search all).
   int max_comp_refs;
 
+  // Bitmask to disable optical flow for prediction modes (0: search all).
+  int opfl_mode_mask;
+
   // flag to skip NEWMV mode in drl if the motion search result is the same
   int skip_repeated_newmv;
 

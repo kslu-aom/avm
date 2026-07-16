@@ -840,6 +840,8 @@ const av2_codec_arg_definitions_t g_av2_codec_arg_defs = {
   .max_comp_refs =
       ARG_DEF(NULL, "max-comp-refs", 1,
               "Max number of compound references (0: search all, default: 0)"),
+  .opfl_mode_mask = ARG_DEF(NULL, "opfl-mode-mask", 1,
+                            "Disable OPFL for some prediction modes"),
 
   .enable_refmvbank = ARG_DEF(NULL, "enable-refmvbank", 1,
                               "Enable reference MV bank (0: false "

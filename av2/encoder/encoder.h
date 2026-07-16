@@ -952,6 +952,8 @@ typedef struct {
   bool avg_cdf_type;
   // Indicates if optical flow refinement should be enabled
   avm_opfl_refine_type enable_opfl_refine;
+  // Bitmask to disable optical flow for prediction modes
+  int opfl_mode_mask;
   // Indicates if BRU is enabled and the mode
   unsigned int enable_bru;
   bool disable_loopfilters_across_tiles;

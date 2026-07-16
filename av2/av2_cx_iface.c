@@ -224,6 +224,7 @@ struct av2_extracfg {
   unsigned int max_drl_refmvs;
   unsigned int max_drl_refbvs;
   int max_comp_refs;
+  int opfl_mode_mask;
   int enable_refmvbank;
   int enable_drl_reorder;
   int enable_cdef_on_skip_txfm;
@@ -556,6 +557,7 @@ static struct av2_extracfg default_extra_cfg = {
   0,            // max_drl_refmvs
   0,    // max_drl_refbvs
   0,    // max_comp_refs
+  0,    // opfl_mode_mask
   1,    // enable_refmvbank
   1,    // enable_drl_reorder;
   1,    // enable_cdef_on_skip_txfm;
@@ -1440,6 +1442,7 @@ static avm_codec_err_t set_encoder_config(AV2EncoderConfig *oxcf,
   tool_cfg->enable_high_motion = extra_cfg->enable_high_motion;
 
   tool_cfg->enable_opfl_refine = extra_cfg->enable_opfl_refine;
+  tool_cfg->opfl_mode_mask = extra_cfg->opfl_mode_mask;
   if (tool_cfg->enable_opfl_refine) {
     if (cfg->g_lag_in_frames == 0) {
       tool_cfg->enable_opfl_refine = 0;
@@ -4509,6 +4512,9 @@ static avm_codec_err_t encoder_set_option(avm_codec_alg_priv_t *ctx,
   } else if (avm_arg_match_helper(&arg, &g_av2_codec_arg_defs.max_comp_refs,
                                   argv, err_string)) {
     extra_cfg.max_comp_refs = avm_arg_parse_int_helper(&arg, err_string);
+  } else if (avm_arg_match_helper(&arg, &g_av2_codec_arg_defs.opfl_mode_mask,
+                                  argv, err_string)) {
+    extra_cfg.opfl_mode_mask = avm_arg_parse_int_helper(&arg, err_string);
   } else if (avm_arg_match_helper(&arg, &g_av2_codec_arg_defs.enable_refmvbank,
                                   argv, err_string)) {
     extra_cfg.enable_refmvbank = avm_arg_parse_int_helper(&arg, err_string);

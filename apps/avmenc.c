@@ -376,6 +376,7 @@ const arg_def_t *av2_key_val_args[] = {
   &g_av2_codec_arg_defs.noise_sens,
   &g_av2_codec_arg_defs.num_tg,
   &g_av2_codec_arg_defs.operating_points_count,
+  &g_av2_codec_arg_defs.opfl_mode_mask,
   &g_av2_codec_arg_defs.qm_max,
   &g_av2_codec_arg_defs.qm_min,
   &g_av2_codec_arg_defs.qp_level,

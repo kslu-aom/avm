@@ -9070,6 +9070,11 @@ void av2_rd_pick_inter_mode_sb(struct AV2_COMP *cpi,
     if (this_mode == WARP_NEWMV && (!warpmv_allowed || !warp_newmv_allowed))
       continue;
     if (this_mode >= NEAR_NEARMV_OPTFLOW && !opfl_modes_allowed) continue;
+    if (this_mode >= NEAR_NEARMV_OPTFLOW && cpi->sf.inter_sf.opfl_mode_mask) {
+      const int opfl_mode_mask = cpi->sf.inter_sf.opfl_mode_mask;
+      const int opfl_mode_idx = this_mode - NEAR_NEARMV_OPTFLOW;
+      if (!((opfl_mode_mask >> opfl_mode_idx) & 1)) continue;
+    }
     if (is_joint_mvd_coding_mode(this_mode) &&
         cm->seq_params.enable_joint_mvd == 0)
       continue;
