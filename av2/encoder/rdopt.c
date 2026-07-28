@@ -5089,71 +5089,6 @@ static void evaluate_inter_predictor(AV2_COMP *const cpi,
   mbmi->motion_mode = SIMPLE_TRANSLATION;
 }
 
-/*!\brief AV2 inter mode RD computation
- *
- * \ingroup inter_mode_search
- * Do the RD search for a given inter mode and compute all information
- * relevant to the input mode. It will compute the best MV, compound
- * parameters (if the mode is a compound mode) and interpolation filter
- * parameters.
- *
- * \param[in]     cpi               Top-level encoder structure.
- * \param[in]     tile_data         Pointer to struct holding adaptive
- *                                  data/contexts/models for the tile during
- *                                  encoding.
- * \param[in]     x                 Pointer to structure holding all the data
- *                                  for the current macroblock.
- * \param[in]     bsize             Current block size.
- * \param[in,out] rd_stats          Struct to keep track of the overall RD
- *                                  information.
- * \param[in,out] rd_stats_y        Struct to keep track of the RD information
- *                                  for only the Y plane.
- * \param[in,out] rd_stats_uv       Struct to keep track of the RD information
- *                                  for only the UV planes.
- * \param[in]     args              HandleInterModeArgs struct holding
- *                                  miscellaneous arguments for inter mode
- *                                  search. See the documentation for this
- *                                  struct for a description of each member.
- * \param[in]     ref_best_rd       Best RD found so far for this block.
- *                                  It is used for early termination of this
- *                                  search if the RD exceeds this value.
- * \param[in]     tmp_buf           Temporary buffer used to hold predictors
- *                                  built in this search.
- * \param[in,out] rd_buffers        CompoundTypeRdBuffers struct to hold all
- *                                  allocated buffers for the compound
- *                                  predictors and masks in the compound type
- *                                  search.
- * \param[in,out] best_est_rd       Estimated RD for motion mode search if
- *                                  do_tx_search (see below) is 0.
- * \param[in]     do_tx_search      Parameter to indicate whether or not to do
- *                                  a full transform search. This will compute
- *                                  an estimated RD for the modes without the
- *                                  transform search and later perform the
- * full transform search on the best candidates. \param[in,out]
- * inter_modes_info  InterModesInfo struct to hold inter mode information to
- * perform a full transform search only on winning candidates searched with an
- * estimate for transform coding RD. \param[in,out] motion_mode_cand  A
- * motion_mode_candidate struct to store motion mode information used in a
- * speed feature to search motion modes other than SIMPLE_TRANSLATION only on
- * winning candidates. \param[in,out] skip_rd           A length 2 array,
- * where skip_rd[0] is the best total RD for a skip mode so far, and
- *                                  skip_rd[1] is the best RD for a skip mode
- * so far in luma. This is used as a speed feature to skip the transform
- * search if the computed skip RD for the current mode is not better than the
- * best skip_rd so far. \param[in] best_ref_mode         Parameter to indicate
- * the best mode so far. This is used as a speed feature to skip the
- *                                  additional scaling factors for joint mvd
- *                                  coding mode.
- * \param[in]     inter_cost_info_from_tpl A PruneInfoFromTpl struct used to
- *                                         narrow down the search based on
- * data collected in the TPL model.
- * \param[in]     top_motion_mode_model_rd A buffer to store N number of model
- * RD
- *
- * \return The RD cost for the mode being searched.
- */
-
-
 static void handle_single_inter_prediction(
     AV2_COMP *const cpi, TileDataEnc *tile_data, MACROBLOCK *x,
     PredictorSearchEnv *env, PredictorSearchState *search_state,
@@ -5453,6 +5388,10 @@ static void handle_compound_inter_prediction(
     ref_mv_idx[1] = flat_idx / ref_set[0];
     ref_mv_idx[0] = flat_idx % ref_set[0];
 
+    if (mbmi->ref_frame[0] == mbmi->ref_frame[1] &&
+        mbmi->mode == NEAR_NEARMV && ref_mv_idx[0] >= ref_mv_idx[1])
+      continue;
+
     mbmi->ref_mv_idx[1] = ref_mv_idx[1];
     mbmi->ref_mv_idx[0] = ref_mv_idx[0];
     int ref_mv_idx_type = av2_ref_mv_idx_type(mbmi, ref_mv_idx);
@@ -5471,10 +5410,6 @@ static void handle_compound_inter_prediction(
 
     int rate_mv = 0;
     int64_t newmv_ret_val = 0;
-
-    if (mbmi->ref_frame[0] == mbmi->ref_frame[1] &&
-        mbmi->mode == NEAR_NEARMV && ref_mv_idx[0] >= ref_mv_idx[1])
-      continue;
 
     for (int scale_index = 0; scale_index < jmvd_scaling_factor_num;
          ++scale_index) {
@@ -5495,6 +5430,21 @@ static void handle_compound_inter_prediction(
              search_state->best_mbmi->ref_mv_idx[1] < ref_mv_idx[1]))
           continue;
       }
+      set_mv_precision(mbmi, mbmi->max_mv_precision);
+
+      if (mbmi->mode != WARPMV && prune_modes_based_on_tpl &&
+          !ref_match_found_in_above_nb && !ref_match_found_in_left_nb &&
+          (*search_state->ref_best_rd != INT64_MAX)) {
+        if (prune_modes_based_on_tpl_stats(
+                &cm->features, inter_cost_info_from_tpl, refs, ref_mv_idx[0],
+                this_mode, cpi->sf.inter_sf.prune_inter_modes_based_on_tpl))
+          continue;
+      }
+      const int drl_cost =
+          get_drl_cost(cm->features.max_drl_bits, mbmi, mbmi_ext, x);
+
+      int rate_mv = 0;
+      int64_t newmv_ret_val = 0;
 
       int cwp_loop_num = cm->features.enable_cwp ? MAX_CWP_NUM : 1;
       if (best_cwp_idxs[scale_index] == CWP_EQUAL &&
@@ -5689,6 +5639,10 @@ static void handle_compound_inter_prediction(
         for (int refinemv_loop = 0; refinemv_loop < REFINEMV_NUM_MODES;
              refinemv_loop++) {
           if (refinemv_loop == 1 &&
+              (!switchable_refinemv_flag(cm, mbmi) ||
+               cpi->sf.inter_sf.disable_switchable_refinemv))
+            continue;
+          if (refinemv_loop == 1 &&
               cpi->sf.inter_sf.prune_refinemv_by_ref_idx &&
               !(base_mbmi.ref_frame[0] == 0 && base_mbmi.ref_frame[1] == 1))
             continue;
@@ -5704,6 +5658,69 @@ static void handle_compound_inter_prediction(
   }
 }
 
+/*!\brief AV2 inter mode RD computation
+ *
+ * \ingroup inter_mode_search
+ * Do the RD search for a given inter mode and compute all information
+ * relevant to the input mode. It will compute the best MV, compound
+ * parameters (if the mode is a compound mode) and interpolation filter
+ * parameters.
+ *
+ * \param[in]     cpi               Top-level encoder structure.
+ * \param[in]     tile_data         Pointer to struct holding adaptive
+ *                                  data/contexts/models for the tile during
+ *                                  encoding.
+ * \param[in]     x                 Pointer to structure holding all the data
+ *                                  for the current macroblock.
+ * \param[in]     bsize             Current block size.
+ * \param[in,out] rd_stats          Struct to keep track of the overall RD
+ *                                  information.
+ * \param[in,out] rd_stats_y        Struct to keep track of the RD information
+ *                                  for only the Y plane.
+ * \param[in,out] rd_stats_uv       Struct to keep track of the RD information
+ *                                  for only the UV planes.
+ * \param[in]     args              HandleInterModeArgs struct holding
+ *                                  miscellaneous arguments for inter mode
+ *                                  search. See the documentation for this
+ *                                  struct for a description of each member.
+ * \param[in]     ref_best_rd       Best RD found so far for this block.
+ *                                  It is used for early termination of this
+ *                                  search if the RD exceeds this value.
+ * \param[in]     tmp_buf           Temporary buffer used to hold predictors
+ *                                  built in this search.
+ * \param[in,out] rd_buffers        CompoundTypeRdBuffers struct to hold all
+ *                                  allocated buffers for the compound
+ *                                  predictors and masks in the compound type
+ *                                  search.
+ * \param[in,out] best_est_rd       Estimated RD for motion mode search if
+ *                                  do_tx_search (see below) is 0.
+ * \param[in]     do_tx_search      Parameter to indicate whether or not to do
+ *                                  a full transform search. This will compute
+ *                                  an estimated RD for the modes without the
+ *                                  transform search and later perform the
+ * full transform search on the best candidates. \param[in,out]
+ * inter_modes_info  InterModesInfo struct to hold inter mode information to
+ * perform a full transform search only on winning candidates searched with an
+ * estimate for transform coding RD. \param[in,out] motion_mode_cand  A
+ * motion_mode_candidate struct to store motion mode information used in a
+ * speed feature to search motion modes other than SIMPLE_TRANSLATION only on
+ * winning candidates. \param[in,out] skip_rd           A length 2 array,
+ * where skip_rd[0] is the best total RD for a skip mode so far, and
+ *                                  skip_rd[1] is the best RD for a skip mode
+ * so far in luma. This is used as a speed feature to skip the transform
+ * search if the computed skip RD for the current mode is not better than the
+ * best skip_rd so far. \param[in] best_ref_mode         Parameter to indicate
+ * the best mode so far. This is used as a speed feature to skip the
+ *                                  additional scaling factors for joint mvd
+ *                                  coding mode.
+ * \param[in]     inter_cost_info_from_tpl A PruneInfoFromTpl struct used to
+ *                                         narrow down the search based on
+ * data collected in the TPL model.
+ * \param[in]     top_motion_mode_model_rd A buffer to store N number of model
+ * RD
+ *
+ * \return The RD cost for the mode being searched.
+ */
 static int64_t handle_inter_mode(
     AV2_COMP *const cpi, TileDataEnc *tile_data, MACROBLOCK *x,
     BLOCK_SIZE bsize, RD_STATS *rd_stats, RD_STATS *rd_stats_y,
