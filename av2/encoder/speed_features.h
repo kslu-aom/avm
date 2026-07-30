@@ -600,6 +600,10 @@ typedef struct INTER_MODE_SPEED_FEATURES {
   // compound reference combinations in priority order.
   int reduce_comp_refs;
 
+  // Limits the maximum number of DRL reference MVs evaluated in the RD search
+  // for inter modes except NEARMV, NEAR_NEARMV, and NEAR_NEARMV_OPTFLOW.
+  int reduce_drl_refmvs;
+
   // Prune reference frames for ALTREF
   int alt_ref_search_fp;
 

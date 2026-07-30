@@ -3660,9 +3660,17 @@ static INLINE int is_single_newmv_valid(const HandleInterModeArgs *const args,
   return 1;
 }
 
-static int get_drl_refmv_count(int max_drl_bits, const MACROBLOCK *const x,
+static int get_drl_refmv_count(const AV2_COMP *const cpi, int max_drl_bits,
+                               const MACROBLOCK *const x,
                                const MV_REFERENCE_FRAME *ref_frame,
                                PREDICTION_MODE mode, int ref_idx) {
+  int max_drl_refmvs = max_drl_bits + 1;
+  const int reduce_drl_refmvs = cpi->sf.inter_sf.reduce_drl_refmvs;
+  if (reduce_drl_refmvs > 0 && mode != NEAR_NEARMV &&
+      mode != NEAR_NEARMV_OPTFLOW && mode != NEARMV) {
+    max_drl_refmvs = AVMMIN(max_drl_refmvs, reduce_drl_refmvs);
+  }
+
   MB_MODE_INFO_EXT *const mbmi_ext = x->mbmi_ext;
   int has_drl = have_drl_index(mode);
   if (!has_drl) {
@@ -3672,7 +3680,7 @@ static int get_drl_refmv_count(int max_drl_bits, const MACROBLOCK *const x,
 
   MB_MODE_INFO *mbmi = x->e_mbd.mi[0];
   if (has_second_drl(mbmi)) {
-    return AVMMIN(max_drl_bits + 1, mbmi_ext->ref_mv_count[ref_frame[ref_idx]]);
+    return AVMMIN(max_drl_refmvs, mbmi_ext->ref_mv_count[ref_frame[ref_idx]]);
   }
 
   const int8_t ref_frame_type = av2_ref_frame_type(ref_frame);
@@ -3686,7 +3694,7 @@ static int get_drl_refmv_count(int max_drl_bits, const MACROBLOCK *const x,
     ref_mv_count = mbmi_ext->skip_mvp_candidate_list.ref_mv_count;
   }
 
-  return AVMMIN(max_drl_bits + 1, ref_mv_count);
+  return AVMMIN(max_drl_refmvs, ref_mv_count);
 }
 
 // Whether this reference motion vector can be skipped, based on initial
@@ -5225,11 +5233,11 @@ static int64_t handle_inter_mode(
   // an index performs well, it will be fully searched in the main loop
   // of this function.
   int ref_set[2];
-  ref_set[0] = get_drl_refmv_count(cm->features.max_drl_bits, x,
+  ref_set[0] = get_drl_refmv_count(cpi, cm->features.max_drl_bits, x,
                                    mbmi->ref_frame, this_mode, 0);
   ref_set[1] = 1;
   if (has_two_drls) {
-    ref_set[1] = get_drl_refmv_count(cm->features.max_drl_bits, x,
+    ref_set[1] = get_drl_refmv_count(cpi, cm->features.max_drl_bits, x,
                                      mbmi->ref_frame, this_mode, 1);
   }
 
@@ -6774,7 +6782,7 @@ static AVM_INLINE void rd_pick_skip_mode(
 
   // loop of ref_mv_idx
   assert(!has_second_drl(mbmi));
-  int ref_set = get_drl_refmv_count(cm->features.max_drl_bits, x,
+  int ref_set = get_drl_refmv_count(cpi, cm->features.max_drl_bits, x,
                                     mbmi->ref_frame, this_mode, 0);
 
   for (int ref_mv_idx = 0; ref_mv_idx < ref_set; ref_mv_idx++) {
@@ -7802,10 +7810,11 @@ static INLINE void init_mbmi(MB_MODE_INFO *mbmi, PREDICTION_MODE curr_mode,
   mbmi->interinter_comp.type = COMPOUND_AVERAGE;
 }
 
-static AVM_INLINE void collect_single_states(const AV2_COMMON *const cm,
+static AVM_INLINE void collect_single_states(const AV2_COMP *const cpi,
                                              MACROBLOCK *x,
                                              InterModeSearchState *search_state,
                                              const MB_MODE_INFO *const mbmi) {
+  const AV2_COMMON *const cm = &cpi->common;
   const FeatureFlags *const features = &cm->features;
   (void)features;
   int i, j;
@@ -7819,7 +7828,7 @@ static AVM_INLINE void collect_single_states(const AV2_COMMON *const cm,
   if (dir == -1) return;
 
   const int mode_offset = INTER_OFFSET(this_mode);
-  const int ref_set = get_drl_refmv_count(features->max_drl_bits, x,
+  const int ref_set = get_drl_refmv_count(cpi, features->max_drl_bits, x,
                                           mbmi->ref_frame, this_mode, 0);
   assert(!has_second_drl(mbmi));
   if (mbmi->use_amvd) return;
@@ -8014,7 +8023,7 @@ static int compound_skip_by_single_states(
     if (!ref_searched[i] || (mode[i] != NEARMV)) {
       continue;
     }
-    const int ref_set = get_drl_refmv_count(cpi->common.features.max_drl_bits,
+    const int ref_set = get_drl_refmv_count(cpi, cpi->common.features.max_drl_bits,
                                             x, refs, this_mode, i);
 
     const MV_REFERENCE_FRAME single_refs[2] = { refs[i], NONE_FRAME };
@@ -9368,7 +9377,7 @@ void av2_rd_pick_inter_mode_sb(struct AV2_COMP *cpi,
       // handle_inter_mode even when this_rd == INT64_MAX, so call before
       // the early exit.
       if (is_single_pred && prune_comp_by_single)
-        collect_single_states(cm, x, &search_state, mbmi);
+        collect_single_states(cpi, x, &search_state, mbmi);
 
       if (this_rd == INT64_MAX) continue;
 

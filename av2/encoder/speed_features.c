@@ -344,6 +344,7 @@ static void set_good_speed_features_framesize_independent(
     sf->inter_sf.skip_compound_prune_top_refs_num_ref0 = 1;
     sf->inter_sf.skip_compound_prune_top_refs_num_ref1 = 2;
     sf->inter_sf.reduce_comp_refs = 2;
+    sf->inter_sf.reduce_drl_refmvs = 0;
     sf->inter_sf.disable_switchable_refinemv = 1;
     sf->inter_sf.prune_refinemv_by_ref_idx = 1;
     sf->inter_sf.prune_interintra_by_ref_idx = 1;
@@ -436,6 +437,7 @@ static void set_good_speed_features_framesize_independent(
             : (boosted ? 1 : 2);
     sf->inter_sf.reduce_inter_modes = boosted ? 1 : 2;
     sf->inter_sf.reuse_inter_intra_mode = 1;
+    sf->inter_sf.reduce_drl_refmvs = 0;
     sf->inter_sf.selective_ref_frame = 2;
     sf->inter_sf.skip_repeated_newmv = 1;
 
@@ -787,6 +789,7 @@ static AVM_INLINE void init_inter_sf(INTER_MODE_SPEED_FEATURES *inter_sf) {
   inter_sf->alt_ref_search_fp = 0;
   inter_sf->disable_switchable_refinemv = 0;
   inter_sf->reduce_comp_refs = 0;
+  inter_sf->reduce_drl_refmvs = 0;
   inter_sf->selective_ref_frame = 0;
   inter_sf->prune_newmv_modes_using_prior_rd = 0;
   inter_sf->share_motion_mode_prune_pool = 0;
