@@ -908,4 +908,26 @@ const av2_codec_arg_definitions_t g_av2_codec_arg_defs = {
               "Cross frame CDF for context initialization "
               "(0: disable cross frame CDF init, 1: enable cross frame CDF "
               "init(default), "),
+  .opfl_mode_mask = ARG_DEF(NULL, "opfl-mode-mask", 1,
+                            "Disable OPFL for some prediction modes"),
+  .max_wrl_idx =
+      ARG_DEF(NULL, "max-wrl-idx", 1, "Max number of WRL indices to search"),
+  .warp_delta_step = ARG_DEF(NULL, "warp-delta-step", 1,
+                                  "2-bit enable mask for warp delta step mode"),
+  .warp_delta_step_mask = ARG_DEF(NULL, "warp-delta-step-mask", 1,
+                                       "2-bit enable mask for warp delta step mode"),
+  .warp_delta_max_iter = ARG_DEF(NULL, "warp-delta-max-iter", 1,
+                                 "Max iterations for warp delta search"),
+  .dis_warp_inter_intra =
+      ARG_DEF(NULL, "dis-warp-inter-intra", 1, "Disable WARP inter-intra"),
+  .interp_filter_mode =
+      ARG_DEF(NULL, "interp-filter-mode", 1, "Frame level interp filter mode"),
+  .max_fr_mv_prec =
+      ARG_DEF(NULL, "max-fr-mv-prec", 1,
+              "Max allowed frame MV precision. 1: 1/2; 2: 1/4; 3: 1/8"),
+  .min_blk_mv_prec = ARG_DEF(NULL, "min-blk-mv-prec", 1,
+                             "Min block MV precision. 1: 1 pel; 2: 4 pel"),
+  .ist_set_num =
+      ARG_DEF(NULL, "ist-set-num", 1,
+              "When not 0, indicates the number of supported IST sets"),
 };

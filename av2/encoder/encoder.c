@@ -1370,6 +1370,9 @@ void av2_change_config(struct AV2_COMP *cpi, const AV2EncoderConfig *oxcf) {
   rc->best_quality = rc_cfg->best_allowed_q;
 
   cm->features.interp_filter = SWITCHABLE;
+  if (cpi->oxcf.motion_mode_cfg.interp_filter_mode <= SWITCHABLE) {
+    cm->features.interp_filter = cpi->oxcf.motion_mode_cfg.interp_filter_mode;
+  }
 
   cm->features.opfl_refine_type = REFINE_SWITCHABLE;
 

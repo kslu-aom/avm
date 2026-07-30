@@ -296,6 +296,16 @@ typedef struct av2_codec_arg_definitions {
   arg_def_t enable_mfh_obu_signaling;
   arg_def_t operating_points_count;
   arg_def_t cross_frame_cdf_init_mode;
+  arg_def_t opfl_mode_mask;
+  arg_def_t max_wrl_idx;
+  arg_def_t warp_delta_step;
+  arg_def_t warp_delta_step_mask;
+  arg_def_t warp_delta_max_iter;
+  arg_def_t dis_warp_inter_intra;
+  arg_def_t interp_filter_mode;
+  arg_def_t max_fr_mv_prec;
+  arg_def_t min_blk_mv_prec;
+  arg_def_t ist_set_num;
 } av2_codec_arg_definitions_t;
 
 extern const av2_codec_arg_definitions_t g_av2_codec_arg_defs;

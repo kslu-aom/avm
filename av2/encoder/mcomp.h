@@ -571,7 +571,7 @@ uint8_t need_mv_adjustment(MACROBLOCKD *xd, const AV2_COMMON *const cm,
                            int *num_nonzero_mvd);
 
 // Returns 1 if able to select a good model, 0 if not
-int av2_pick_warp_delta(const AV2_COMMON *const cm, MACROBLOCKD *xd,
+int av2_pick_warp_delta(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
                         MB_MODE_INFO *mbmi,
                         const SUBPEL_MOTION_SEARCH_PARAMS *ms_params,
                         const ModeCosts *mode_costs,

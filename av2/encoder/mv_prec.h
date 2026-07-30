@@ -31,6 +31,12 @@ static AVM_INLINE int av2_frame_allows_smart_mv(const AV2_COMP *cpi) {
 
 static AVM_INLINE void av2_set_high_precision_mv(AV2_COMP *cpi,
                                                  MvSubpelPrecision precision) {
+  if (cpi->oxcf.motion_mode_cfg.max_fr_mv_prec &&
+      !cpi->common.features.cur_frame_force_integer_mv) {
+    const MvSubpelPrecision max_prec =
+        MV_PRECISION_ONE_PEL + cpi->oxcf.motion_mode_cfg.max_fr_mv_prec;
+    precision = max_prec;
+  }
   FeatureFlags *features = &cpi->common.features;
   features->fr_mv_precision = precision;
   features->use_pb_mv_precision = 0;

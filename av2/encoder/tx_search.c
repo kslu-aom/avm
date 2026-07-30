@@ -2513,6 +2513,9 @@ static void search_tx_type(const AV2_COMP *cpi, MACROBLOCK *x, int plane,
     assert(max_set_id < IST_SET_SIZE);
 
     for (int set_idx = 0; set_idx < max_set_id; ++set_idx) {
+      if (cpi->oxcf.txfm_cfg.ist_set_num > 0) {
+        if (set_idx >= cpi->oxcf.txfm_cfg.ist_set_num) continue;
+      }
       txfm_param.sec_tx_set_idx = set_idx;
       const uint8_t set_id = get_ist_set_id(set_idx, is_inter, intra_mode, txw,
                                             txh, primary_tx_type);

@@ -2403,6 +2403,9 @@ void av2_encode_frame(AV2_COMP *cpi) {
       current_frame->reference_mode = REFERENCE_MODE_SELECT;
 
     features->interp_filter = SWITCHABLE;
+    if (cpi->oxcf.motion_mode_cfg.interp_filter_mode <= SWITCHABLE) {
+      cm->features.interp_filter = cpi->oxcf.motion_mode_cfg.interp_filter_mode;
+    }
 
     rdc->compound_ref_used_flag = 0;
     rdc->skip_mode_used_flag = 0;

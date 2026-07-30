@@ -359,6 +359,7 @@ typedef struct {
    * Flag to indicate if cross chroma component transform is enabled.
    */
   bool enable_cctx;
+  int ist_set_num;
 } TxfmSizeTypeCfg;
 
 /*!
@@ -616,6 +617,15 @@ typedef struct {
   // Bitmask of which motion modes are enabled at the sequence level
   int seq_enabled_motion_modes;
   int enable_six_param_warp_delta;
+  int opfl_mode_mask;
+  int max_wrl_idx;
+  int warp_delta_step;
+  int warp_delta_step_mask;
+  int warp_delta_max_iter;
+  int dis_warp_inter_intra;
+  int interp_filter_mode;
+  int max_fr_mv_prec;
+  int min_blk_mv_prec;
 } MotionModeCfg;
 
 typedef struct {

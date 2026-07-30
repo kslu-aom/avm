@@ -2640,7 +2640,7 @@ static AVM_INLINE int handle_warp_delta_mode(
     if (use_six_param_in_winner ||
         !cpi->sf.inter_sf.enable_six_param_warp_in_winner_mode)
       valid = av2_pick_warp_delta(
-          cm, xd, mbmi, &ms_params, &x->mode_costs, prev_best_models,
+          cpi, xd, mbmi, &ms_params, &x->mode_costs, prev_best_models,
           mbmi_ext->warp_param_stack[av2_ref_frame_type(mbmi->ref_frame)]);
   }
 
@@ -3335,8 +3335,13 @@ static int64_t motion_mode_rd(
           1 + (allow_warp_inter_intra(&base_mbmi) && !is_low_delay_enc);
       for (int warp_inter_intra = 0; warp_inter_intra < warp_inter_intra_limit;
            warp_inter_intra++) {
+        if (cpi->oxcf.motion_mode_cfg.dis_warp_inter_intra && warp_inter_intra)
+          continue;
         for (int warp_ref_idx = 0; warp_ref_idx < warp_ref_idx_limit;
              warp_ref_idx++) {
+          if (cpi->oxcf.motion_mode_cfg.max_wrl_idx &&
+              warp_ref_idx >= cpi->oxcf.motion_mode_cfg.max_wrl_idx)
+            continue;
           // Search warp interintra in winner mode for remaing wrl indices
           // if warp interintra is selected in rough mode
           if (cpi->sf.inter_sf.enable_warp_inter_intra_in_winner &&
@@ -3372,6 +3377,13 @@ static int64_t motion_mode_rd(
         for (int warp_precision_idx = 0;
              warp_precision_idx < NUM_WARP_PRECISION_MODES;
              warp_precision_idx++) {
+          const int step_mask =
+              cpi->oxcf.motion_mode_cfg.warp_delta_step_mask
+                  ? cpi->oxcf.motion_mode_cfg.warp_delta_step_mask
+                  : cpi->oxcf.motion_mode_cfg.warp_delta_step;
+          if (step_mask) {
+            if (!((step_mask >> warp_precision_idx) & 1)) continue;
+          }
           const MotionModeTrialParams trial = {
             mode_index, warp_ref_idx,      warp_ref_idx_limit, 0,
             0,          warp_precision_idx
@@ -5297,6 +5309,13 @@ static int64_t handle_inter_mode(
          precision_dx >= 0; precision_dx--) {
       MvSubpelPrecision pb_mv_precision =
           precision_def->precision[precision_dx];
+      if (cpi->oxcf.motion_mode_cfg.min_blk_mv_prec) {
+        const int min_prec = cpi->oxcf.motion_mode_cfg.min_blk_mv_prec == 1
+                                 ? MV_PRECISION_ONE_PEL
+                                 : MV_PRECISION_FOUR_PEL;
+        if (mbmi->max_mv_precision >= min_prec && pb_mv_precision < min_prec)
+          continue;
+      }
       assert(pb_mv_precision <= mbmi->max_mv_precision);
       set_mv_precision(mbmi, pb_mv_precision);
 
@@ -9215,6 +9234,12 @@ void av2_rd_pick_inter_mode_sb(struct AV2_COMP *cpi,
     if (this_mode == WARP_NEWMV && (!warpmv_allowed || !warp_newmv_allowed))
       continue;
     if (this_mode >= NEAR_NEARMV_OPTFLOW && !opfl_modes_allowed) continue;
+    if (this_mode >= NEAR_NEARMV_OPTFLOW &&
+        cpi->oxcf.motion_mode_cfg.opfl_mode_mask) {
+      const int opfl_mode_mask = cpi->oxcf.motion_mode_cfg.opfl_mode_mask;
+      const int opfl_mode_idx = this_mode - NEAR_NEARMV_OPTFLOW;
+      if (!((opfl_mode_mask >> opfl_mode_idx) & 1)) continue;
+    }
     if (is_joint_mvd_coding_mode(this_mode) &&
         cm->seq_params.enable_joint_mvd == 0)
       continue;

@@ -5062,12 +5062,13 @@ static int get_valid_model_from_warp_stats_buffer(
 // search functions, due to the way that it alternates MV and warp parameter
 // refinement. Need to revisit this function in phase 2 and revisit whether
 // there is a good way to do something similar.
-int av2_pick_warp_delta(const AV2_COMMON *const cm, MACROBLOCKD *xd,
+int av2_pick_warp_delta(const AV2_COMP *cpi, MACROBLOCKD *xd,
                         MB_MODE_INFO *mbmi,
                         const SUBPEL_MOTION_SEARCH_PARAMS *ms_params,
                         const ModeCosts *mode_costs,
                         warp_mode_info_array *prev_best_models,
                         WARP_CANDIDATE *warp_param_stack) {
+  const AV2_COMMON *const cm = &cpi->common;
   WarpedMotionParams *params = &mbmi->wm_params[0];
   const BLOCK_SIZE bsize = mbmi->sb_type[PLANE_TYPE_Y];
   int mi_row = xd->mi_row;
@@ -5172,6 +5173,10 @@ int av2_pick_warp_delta(const AV2_COMMON *const cm, MACROBLOCKD *xd,
   int number_of_iterations = (max_coded_index >= WARP_DELTA_NUMSYMBOLS_LOW)
                                  ? MAX_WARP_DELTA_ITERS_EXT
                                  : MAX_WARP_DELTA_ITERS;
+
+  if (cpi->oxcf.motion_mode_cfg.warp_delta_max_iter) {
+    number_of_iterations = cpi->oxcf.motion_mode_cfg.warp_delta_max_iter;
+  }
 
   if (enable_fast_model_search) {
     number_of_iterations = 2;

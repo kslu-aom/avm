@@ -246,6 +246,16 @@ struct av2_extracfg {
   int multi_layers_lag_test;
   int force_deferred_frames_for_ras_test;
   unsigned int enable_low_complexity_decode;
+  int opfl_mode_mask;
+  int max_wrl_idx;
+  int warp_delta_step;
+  int warp_delta_step_mask;
+  int warp_delta_max_iter;
+  int dis_warp_inter_intra;
+  int interp_filter_mode;
+  int max_fr_mv_prec;
+  int min_blk_mv_prec;
+  int ist_set_num;
 };
 
 // Example subgop configs. Currently not used by default.
@@ -576,6 +586,16 @@ static struct av2_extracfg default_extra_cfg = {
   0,      // multi_layers_test for nozero lag
   0,      // force_deferred_frames_for_ras_test
   0,      // enable_low_complexity_decode
+  0,   // opfl_mode_mask
+  0,   // max_wrl_idx
+  0,   // warp_delta_step
+  0,   // warp_delta_step_mask
+  0,   // warp_delta_max_iter
+  0,   // dis_warp_inter_intra
+  16,  // interp_filter_mode
+  0,   // max_fr_mv_prec
+  0,   // min_blk_mv_prec
+  0,   // ist_set_num
 };
 // clang-format on
 
@@ -1650,6 +1670,15 @@ static avm_codec_err_t set_encoder_config(AV2EncoderConfig *oxcf,
   oxcf->motion_mode_cfg.seq_enabled_motion_modes = seq_enabled_motion_modes;
   oxcf->motion_mode_cfg.enable_six_param_warp_delta =
       enable_six_param_warp_delta;
+  oxcf->motion_mode_cfg.opfl_mode_mask = extra_cfg->opfl_mode_mask;
+  oxcf->motion_mode_cfg.max_wrl_idx = extra_cfg->max_wrl_idx;
+  oxcf->motion_mode_cfg.warp_delta_step = extra_cfg->warp_delta_step;
+  oxcf->motion_mode_cfg.warp_delta_step_mask = extra_cfg->warp_delta_step_mask;
+  oxcf->motion_mode_cfg.warp_delta_max_iter = extra_cfg->warp_delta_max_iter;
+  oxcf->motion_mode_cfg.dis_warp_inter_intra = extra_cfg->dis_warp_inter_intra;
+  oxcf->motion_mode_cfg.interp_filter_mode = extra_cfg->interp_filter_mode;
+  oxcf->motion_mode_cfg.max_fr_mv_prec = extra_cfg->max_fr_mv_prec;
+  oxcf->motion_mode_cfg.min_blk_mv_prec = extra_cfg->min_blk_mv_prec;
 
   // Set partition related configuration.
   part_cfg->disable_ml_partition_speed_features =
@@ -1692,6 +1721,7 @@ static avm_codec_err_t set_encoder_config(AV2EncoderConfig *oxcf,
   txfm_cfg->disable_ml_transform_speed_features =
       extra_cfg->disable_ml_transform_speed_features;
   txfm_cfg->enable_tx_partition = extra_cfg->enable_tx_partition;
+  txfm_cfg->ist_set_num = extra_cfg->ist_set_num;
   txfm_cfg->enable_ist = extra_cfg->enable_ist && !extra_cfg->lossless;
   txfm_cfg->enable_inter_ist =
       extra_cfg->enable_inter_ist && !extra_cfg->lossless;
@@ -4582,6 +4612,41 @@ static avm_codec_err_t encoder_set_option(avm_codec_alg_priv_t *ctx,
                                   argv, err_string)) {
     extra_cfg.operating_points_count =
         avm_arg_parse_int_helper(&arg, err_string);
+  } else if (avm_arg_match_helper(&arg, &g_av2_codec_arg_defs.opfl_mode_mask,
+                                  argv, err_string)) {
+    extra_cfg.opfl_mode_mask = avm_arg_parse_int_helper(&arg, err_string);
+  } else if (avm_arg_match_helper(&arg, &g_av2_codec_arg_defs.max_wrl_idx,
+                                  argv, err_string)) {
+    extra_cfg.max_wrl_idx = avm_arg_parse_int_helper(&arg, err_string);
+  } else if (avm_arg_match_helper(&arg, &g_av2_codec_arg_defs.warp_delta_step,
+                                  argv, err_string)) {
+    extra_cfg.warp_delta_step = avm_arg_parse_int_helper(&arg, err_string);
+  } else if (avm_arg_match_helper(
+                 &arg, &g_av2_codec_arg_defs.warp_delta_step_mask, argv,
+                 err_string)) {
+    extra_cfg.warp_delta_step_mask =
+        avm_arg_parse_int_helper(&arg, err_string);
+  } else if (avm_arg_match_helper(
+                 &arg, &g_av2_codec_arg_defs.warp_delta_max_iter, argv,
+                 err_string)) {
+    extra_cfg.warp_delta_max_iter = avm_arg_parse_int_helper(&arg, err_string);
+  } else if (avm_arg_match_helper(
+                 &arg, &g_av2_codec_arg_defs.dis_warp_inter_intra, argv,
+                 err_string)) {
+    extra_cfg.dis_warp_inter_intra = avm_arg_parse_int_helper(&arg, err_string);
+  } else if (avm_arg_match_helper(
+                 &arg, &g_av2_codec_arg_defs.interp_filter_mode, argv,
+                 err_string)) {
+    extra_cfg.interp_filter_mode = avm_arg_parse_int_helper(&arg, err_string);
+  } else if (avm_arg_match_helper(&arg, &g_av2_codec_arg_defs.max_fr_mv_prec,
+                                  argv, err_string)) {
+    extra_cfg.max_fr_mv_prec = avm_arg_parse_int_helper(&arg, err_string);
+  } else if (avm_arg_match_helper(&arg, &g_av2_codec_arg_defs.min_blk_mv_prec,
+                                  argv, err_string)) {
+    extra_cfg.min_blk_mv_prec = avm_arg_parse_int_helper(&arg, err_string);
+  } else if (avm_arg_match_helper(&arg, &g_av2_codec_arg_defs.ist_set_num,
+                                  argv, err_string)) {
+    extra_cfg.ist_set_num = avm_arg_parse_int_helper(&arg, err_string);
   } else {
     match = 0;
     snprintf(err_string, ARG_ERR_MSG_MAX_LEN, "Cannot find avm option %s",
