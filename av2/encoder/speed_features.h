@@ -18,6 +18,22 @@
 #include "av2/encoder/mcomp.h"
 #include "av2/encoder/encodemb.h"
 
+#ifndef TENTATIVE_FAST_WARP_DELTA_ROUGH_STAGE_WRL
+#define TENTATIVE_FAST_WARP_DELTA_ROUGH_STAGE_WRL 1
+#endif
+
+#ifndef TENTATIVE_FAST_WARP_DELTA_ROUGH_STAGE_ITER
+#define TENTATIVE_FAST_WARP_DELTA_ROUGH_STAGE_ITER 1
+#endif
+
+#ifndef TENTATIVE_FAST_WARP_DELTA_ROUGH_STAGE_STEP
+#define TENTATIVE_FAST_WARP_DELTA_ROUGH_STAGE_STEP 1
+#endif
+
+#ifndef TENTATIVE_FAST_WARP_DELTA_ROUGH_STAGE_INTERINTRA
+#define TENTATIVE_FAST_WARP_DELTA_ROUGH_STAGE_INTERINTRA 1
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -603,6 +619,9 @@ typedef struct INTER_MODE_SPEED_FEATURES {
   // Limits the maximum number of DRL reference MVs evaluated in the RD search
   // for inter modes except NEARMV, NEAR_NEARMV, and NEAR_NEARMV_OPTFLOW.
   int reduce_drl_refmvs;
+
+  // Simplifies warp delta search in rough mode stage (speed >= 1)
+  int fast_warp_delta_rough_stage;
 
   // Prune reference frames for ALTREF
   int alt_ref_search_fp;

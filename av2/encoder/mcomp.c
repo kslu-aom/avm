@@ -5067,7 +5067,8 @@ int av2_pick_warp_delta(const AV2_COMP *cpi, MACROBLOCKD *xd,
                         const SUBPEL_MOTION_SEARCH_PARAMS *ms_params,
                         const ModeCosts *mode_costs,
                         warp_mode_info_array *prev_best_models,
-                        WARP_CANDIDATE *warp_param_stack) {
+                        WARP_CANDIDATE *warp_param_stack,
+                        int eval_motion_mode) {
   const AV2_COMMON *const cm = &cpi->common;
   WarpedMotionParams *params = &mbmi->wm_params[0];
   const BLOCK_SIZE bsize = mbmi->sb_type[PLANE_TYPE_Y];
@@ -5198,6 +5199,11 @@ int av2_pick_warp_delta(const AV2_COMP *cpi, MACROBLOCKD *xd,
   if (enable_fast_model_search) {
     number_of_iterations = 2;
   }
+#if TENTATIVE_FAST_WARP_DELTA_ROUGH_STAGE_ITER
+  if (cpi->sf.inter_sf.fast_warp_delta_rough_stage && !eval_motion_mode) {
+    number_of_iterations = AVMMIN(number_of_iterations, 2);
+  }
+#endif
 
   // Set up initial model by copying global motion model
   // and adjusting for the chosen motion vector

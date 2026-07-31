@@ -2647,7 +2647,8 @@ static AVM_INLINE int handle_warp_delta_mode(
         !cpi->sf.inter_sf.enable_six_param_warp_in_winner_mode)
       valid = av2_pick_warp_delta(
           cpi, xd, mbmi, &ms_params, &x->mode_costs, prev_best_models,
-          mbmi_ext->warp_param_stack[av2_ref_frame_type(mbmi->ref_frame)]);
+          mbmi_ext->warp_param_stack[av2_ref_frame_type(mbmi->ref_frame)],
+          eval_motion_mode);
   }
 
   if (!valid) return -1;
@@ -3343,11 +3344,21 @@ static int64_t motion_mode_rd(
            warp_inter_intra++) {
         if (cpi->oxcf.motion_mode_cfg.dis_warp_inter_intra && warp_inter_intra)
           continue;
+#if TENTATIVE_FAST_WARP_DELTA_ROUGH_STAGE_INTERINTRA
+        if (cpi->sf.inter_sf.fast_warp_delta_rough_stage && !eval_motion_mode &&
+            warp_inter_intra)
+          continue;
+#endif
         for (int warp_ref_idx = 0; warp_ref_idx < warp_ref_idx_limit;
              warp_ref_idx++) {
           if (cpi->oxcf.motion_mode_cfg.max_wrl_idx &&
               warp_ref_idx >= cpi->oxcf.motion_mode_cfg.max_wrl_idx)
             continue;
+#if TENTATIVE_FAST_WARP_DELTA_ROUGH_STAGE_WRL
+          if (cpi->sf.inter_sf.fast_warp_delta_rough_stage && !eval_motion_mode &&
+              warp_ref_idx >= 1)
+            continue;
+#endif
           // Search warp interintra in winner mode for remaing wrl indices
           // if warp interintra is selected in rough mode
           if (cpi->sf.inter_sf.enable_warp_inter_intra_in_winner &&
@@ -3380,9 +3391,19 @@ static int64_t motion_mode_rd(
       ctx.prev_best_models = &prev_best_models;
       for (int warp_ref_idx = 0; warp_ref_idx < warp_ref_idx_limit;
            warp_ref_idx++) {
+#if TENTATIVE_FAST_WARP_DELTA_ROUGH_STAGE_WRL
+        if (cpi->sf.inter_sf.fast_warp_delta_rough_stage && !eval_motion_mode &&
+            warp_ref_idx >= 1)
+          continue;
+#endif
         for (int warp_precision_idx = 0;
              warp_precision_idx < NUM_WARP_PRECISION_MODES;
              warp_precision_idx++) {
+#if TENTATIVE_FAST_WARP_DELTA_ROUGH_STAGE_STEP
+          if (cpi->sf.inter_sf.fast_warp_delta_rough_stage && !eval_motion_mode &&
+              warp_precision_idx > 0)
+            continue;
+#endif
           const int step_mask =
               cpi->oxcf.motion_mode_cfg.warp_delta_step_mask
                   ? cpi->oxcf.motion_mode_cfg.warp_delta_step_mask
