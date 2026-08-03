@@ -628,6 +628,10 @@ typedef struct {
   int max_fr_mv_prec;
   int min_blk_mv_prec;
   int dis_jmvd_scale;
+  int warp_delta_directional_step;
+  int warp_delta_rotzoom_prune;
+  int warp_delta_neighbor_pred;
+  int warp_delta_var_prune;
 } MotionModeCfg;
 
 typedef struct {

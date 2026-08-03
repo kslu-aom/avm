@@ -308,6 +308,9 @@ typedef struct av2_codec_arg_definitions {
   arg_def_t ist_set_num;
   arg_def_t max_allowed_primary_tx;
   arg_def_t dis_jmvd_scale;
+  arg_def_t warp_delta_rotzoom_prune;
+  arg_def_t warp_delta_neighbor_pred;
+  arg_def_t warp_delta_var_prune;
 } av2_codec_arg_definitions_t;
 
 extern const av2_codec_arg_definitions_t g_av2_codec_arg_defs;

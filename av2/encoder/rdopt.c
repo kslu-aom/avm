@@ -2576,6 +2576,12 @@ static AVM_INLINE int handle_warp_delta_mode(
     return -1;
   }
 
+  if (cpi->oxcf.motion_mode_cfg.warp_delta_var_prune) {
+    if (x->source_variance != UINT_MAX && x->source_variance < 16) {
+      return -1;
+    }
+  }
+
   int_mv wrl_ref_mv = mbmi->mv[0];
   mbmi->warp_inter_intra = 0;
 

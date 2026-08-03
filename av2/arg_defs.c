@@ -936,4 +936,16 @@ const av2_codec_arg_definitions_t g_av2_codec_arg_defs = {
   .dis_jmvd_scale =
       ARG_DEF(NULL, "dis-jmvd-scale", 1,
               "Disable JMVD scale mode (1: all joint modes, 2: JOINT_NEWMV_OPTFLOW only)"),
+  .warp_delta_directional_step =
+      ARG_DEF(NULL, "enable-warp-delta-directional-step", 1,
+              "Enable directional step search for warp delta"),
+  .warp_delta_rotzoom_prune =
+      ARG_DEF(NULL, "enable-warp-delta-rotzoom-prune", 1,
+              "Prune 6-param affine search if 4-param rotzoom shows no gain"),
+  .warp_delta_neighbor_pred =
+      ARG_DEF(NULL, "enable-warp-delta-neighbor-pred", 1,
+              "Use spatial neighbor warp delta parameter prediction"),
+  .warp_delta_var_prune =
+      ARG_DEF(NULL, "enable-warp-delta-var-prune", 1,
+              "Prune warp delta search for low variance blocks"),
 };

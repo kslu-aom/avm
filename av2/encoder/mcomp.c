@@ -5170,6 +5170,23 @@ int av2_pick_warp_delta(const AV2_COMP *cpi, MACROBLOCKD *xd,
     }
   }
 
+  if (cpi->oxcf.motion_mode_cfg.warp_delta_neighbor_pred &&
+      !enable_fast_model_search) {
+    const MB_MODE_INFO *nb_mbmi = NULL;
+    if (xd->left_available && xd->mi[-1] &&
+        xd->mi[-1]->motion_mode == WARP_DELTA &&
+        xd->mi[-1]->ref_frame[0] == mbmi->ref_frame[0]) {
+      nb_mbmi = xd->mi[-1];
+    } else if (xd->up_available && xd->mi[-xd->mi_stride] &&
+               xd->mi[-xd->mi_stride]->motion_mode == WARP_DELTA &&
+               xd->mi[-xd->mi_stride]->ref_frame[0] == mbmi->ref_frame[0]) {
+      nb_mbmi = xd->mi[-xd->mi_stride];
+    }
+    if (nb_mbmi) {
+      start_params = nb_mbmi->wm_params[0];
+    }
+  }
+
   int number_of_iterations = (max_coded_index >= WARP_DELTA_NUMSYMBOLS_LOW)
                                  ? MAX_WARP_DELTA_ITERS_EXT
                                  : MAX_WARP_DELTA_ITERS;
@@ -5219,6 +5236,9 @@ int av2_pick_warp_delta(const AV2_COMP *cpi, MACROBLOCKD *xd,
   // Refine model, by making a few passes through the available
   // parameters and trying to increase/decrease them
 
+  int prev_dir[6] = { 0 };
+  bool rotzoom_improved = false;
+
   for (int iter = 0; iter < number_of_iterations; iter++) {
     int center_best_so_far = 1;
 
@@ -5231,93 +5251,256 @@ int av2_pick_warp_delta(const AV2_COMP *cpi, MACROBLOCKD *xd,
       center_mv.as_mv = *best_mv;
     }
 
-    for (int param_index = 2;
-         param_index < (mbmi->six_param_warp_model_flag ? 6 : 4);
-         param_index++) {
-      // Try increasing the parameter
-      *params = best_wm_params;
-      params->wmmat[param_index] += step_size;
-      delta = params->wmmat[param_index] - base_params.wmmat[param_index];
-      if (abs(delta) > max_warp_delta_value) {
-        inc_rd = UINT64_MAX;
-      } else {
-        if (!mbmi->six_param_warp_model_flag) {
-          params->wmmat[4] = -params->wmmat[3];
-          params->wmmat[5] = params->wmmat[2];
-        }
-        valid = av2_is_warp_model_reduced(params);
-        av2_get_shear_params(params, sf);
+    int max_param_index = (mbmi->six_param_warp_model_flag ? 6 : 4);
+    if (cpi->oxcf.motion_mode_cfg.warp_delta_rotzoom_prune &&
+        mbmi->six_param_warp_model_flag && !rotzoom_improved && iter > 0) {
+      max_param_index = 4;
+    }
 
-        if (valid) {
-          av2_set_warp_translation(mi_row, mi_col, bsize, center_mv.as_mv,
-                                   params);
-          rate = warp_precision_idx_rate +
-                 av2_cost_model_param(mbmi, mode_costs, step_size,
-                                      max_coded_index, &base_params);
-          sse = compute_motion_cost(xd, cm, ms_params, bsize, best_mv,
-                                    can_refine_mv);
-          inc_rd = sse + (int)ROUND_POWER_OF_TWO_64(
-                             (int64_t)rate * error_per_bit,
-                             RDDIV_BITS + AV2_PROB_COST_SHIFT - RD_EPB_SHIFT +
-                                 PIXEL_TRANSFORM_ERROR_SCALE);
-        } else {
+    for (int param_index = 2; param_index < max_param_index; param_index++) {
+      int eval_dir = cpi->oxcf.motion_mode_cfg.warp_delta_directional_step &&
+                             iter > 0
+                         ? prev_dir[param_index]
+                         : 0;
+
+      if (eval_dir == 1) {
+        // Preferred direction: Increase (+step) first
+        *params = best_wm_params;
+        params->wmmat[param_index] += step_size;
+        delta = params->wmmat[param_index] - base_params.wmmat[param_index];
+        if (abs(delta) > max_warp_delta_value) {
           inc_rd = UINT64_MAX;
-        }
-      }
-      WarpedMotionParams inc_params = *params;
-
-      // Try decreasing the parameter
-      *params = best_wm_params;
-      params->wmmat[param_index] -= step_size;
-      delta = params->wmmat[param_index] - base_params.wmmat[param_index];
-      if (abs(delta) > max_warp_delta_value) {
-        dec_rd = UINT64_MAX;
-      } else {
-        if (!mbmi->six_param_warp_model_flag) {
-          params->wmmat[4] = -params->wmmat[3];
-          params->wmmat[5] = params->wmmat[2];
-        }
-        valid = av2_is_warp_model_reduced(params);
-        av2_get_shear_params(params, sf);
-        if (valid) {
-          av2_set_warp_translation(mi_row, mi_col, bsize, center_mv.as_mv,
-                                   params);
-          rate = warp_precision_idx_rate +
-                 av2_cost_model_param(mbmi, mode_costs, step_size,
-                                      max_coded_index, &base_params);
-          sse = compute_motion_cost(xd, cm, ms_params, bsize, best_mv,
-                                    can_refine_mv);
-          dec_rd = sse + (int)ROUND_POWER_OF_TWO_64(
-                             (int64_t)rate * error_per_bit,
-                             RDDIV_BITS + AV2_PROB_COST_SHIFT - RD_EPB_SHIFT +
-                                 PIXEL_TRANSFORM_ERROR_SCALE);
         } else {
-          dec_rd = UINT64_MAX;
+          if (!mbmi->six_param_warp_model_flag) {
+            params->wmmat[4] = -params->wmmat[3];
+            params->wmmat[5] = params->wmmat[2];
+          }
+          valid = av2_is_warp_model_reduced(params);
+          av2_get_shear_params(params, sf);
+          if (valid) {
+            av2_set_warp_translation(mi_row, mi_col, bsize, center_mv.as_mv,
+                                     params);
+            rate = warp_precision_idx_rate +
+                   av2_cost_model_param(mbmi, mode_costs, step_size,
+                                        max_coded_index, &base_params);
+            sse = compute_motion_cost(xd, cm, ms_params, bsize, best_mv,
+                                      can_refine_mv);
+            inc_rd = sse + (int)ROUND_POWER_OF_TWO_64(
+                               (int64_t)rate * error_per_bit,
+                               RDDIV_BITS + AV2_PROB_COST_SHIFT -
+                                   RD_EPB_SHIFT + PIXEL_TRANSFORM_ERROR_SCALE);
+          } else {
+            inc_rd = UINT64_MAX;
+          }
         }
-      }
-      WarpedMotionParams dec_params = *params;
+        if (inc_rd < best_rd) {
+          best_wm_params = *params;
+          best_rd = inc_rd;
+          center_best_so_far = 0;
+          prev_dir[param_index] = 1;
+          if (param_index < 4) rotzoom_improved = true;
+          continue;
+        }
+        // Fallback to decrease (-step)
+        *params = best_wm_params;
+        params->wmmat[param_index] -= step_size;
+        delta = params->wmmat[param_index] - base_params.wmmat[param_index];
+        if (abs(delta) > max_warp_delta_value) {
+          dec_rd = UINT64_MAX;
+        } else {
+          if (!mbmi->six_param_warp_model_flag) {
+            params->wmmat[4] = -params->wmmat[3];
+            params->wmmat[5] = params->wmmat[2];
+          }
+          valid = av2_is_warp_model_reduced(params);
+          av2_get_shear_params(params, sf);
+          if (valid) {
+            av2_set_warp_translation(mi_row, mi_col, bsize, center_mv.as_mv,
+                                     params);
+            rate = warp_precision_idx_rate +
+                   av2_cost_model_param(mbmi, mode_costs, step_size,
+                                        max_coded_index, &base_params);
+            sse = compute_motion_cost(xd, cm, ms_params, bsize, best_mv,
+                                      can_refine_mv);
+            dec_rd = sse + (int)ROUND_POWER_OF_TWO_64(
+                               (int64_t)rate * error_per_bit,
+                               RDDIV_BITS + AV2_PROB_COST_SHIFT -
+                                   RD_EPB_SHIFT + PIXEL_TRANSFORM_ERROR_SCALE);
+          } else {
+            dec_rd = UINT64_MAX;
+          }
+        }
+        if (dec_rd < best_rd) {
+          best_wm_params = *params;
+          best_rd = dec_rd;
+          center_best_so_far = 0;
+          prev_dir[param_index] = -1;
+          if (param_index < 4) rotzoom_improved = true;
+        } else {
+          prev_dir[param_index] = 0;
+        }
+      } else if (eval_dir == -1) {
+        // Preferred direction: Decrease (-step) first
+        *params = best_wm_params;
+        params->wmmat[param_index] -= step_size;
+        delta = params->wmmat[param_index] - base_params.wmmat[param_index];
+        if (abs(delta) > max_warp_delta_value) {
+          dec_rd = UINT64_MAX;
+        } else {
+          if (!mbmi->six_param_warp_model_flag) {
+            params->wmmat[4] = -params->wmmat[3];
+            params->wmmat[5] = params->wmmat[2];
+          }
+          valid = av2_is_warp_model_reduced(params);
+          av2_get_shear_params(params, sf);
+          if (valid) {
+            av2_set_warp_translation(mi_row, mi_col, bsize, center_mv.as_mv,
+                                     params);
+            rate = warp_precision_idx_rate +
+                   av2_cost_model_param(mbmi, mode_costs, step_size,
+                                        max_coded_index, &base_params);
+            sse = compute_motion_cost(xd, cm, ms_params, bsize, best_mv,
+                                      can_refine_mv);
+            dec_rd = sse + (int)ROUND_POWER_OF_TWO_64(
+                               (int64_t)rate * error_per_bit,
+                               RDDIV_BITS + AV2_PROB_COST_SHIFT -
+                                   RD_EPB_SHIFT + PIXEL_TRANSFORM_ERROR_SCALE);
+          } else {
+            dec_rd = UINT64_MAX;
+          }
+        }
+        if (dec_rd < best_rd) {
+          best_wm_params = *params;
+          best_rd = dec_rd;
+          center_best_so_far = 0;
+          prev_dir[param_index] = -1;
+          if (param_index < 4) rotzoom_improved = true;
+          continue;
+        }
+        // Fallback to increase (+step)
+        *params = best_wm_params;
+        params->wmmat[param_index] += step_size;
+        delta = params->wmmat[param_index] - base_params.wmmat[param_index];
+        if (abs(delta) > max_warp_delta_value) {
+          inc_rd = UINT64_MAX;
+        } else {
+          if (!mbmi->six_param_warp_model_flag) {
+            params->wmmat[4] = -params->wmmat[3];
+            params->wmmat[5] = params->wmmat[2];
+          }
+          valid = av2_is_warp_model_reduced(params);
+          av2_get_shear_params(params, sf);
+          if (valid) {
+            av2_set_warp_translation(mi_row, mi_col, bsize, center_mv.as_mv,
+                                     params);
+            rate = warp_precision_idx_rate +
+                   av2_cost_model_param(mbmi, mode_costs, step_size,
+                                        max_coded_index, &base_params);
+            sse = compute_motion_cost(xd, cm, ms_params, bsize, best_mv,
+                                      can_refine_mv);
+            inc_rd = sse + (int)ROUND_POWER_OF_TWO_64(
+                               (int64_t)rate * error_per_bit,
+                               RDDIV_BITS + AV2_PROB_COST_SHIFT -
+                                   RD_EPB_SHIFT + PIXEL_TRANSFORM_ERROR_SCALE);
+          } else {
+            inc_rd = UINT64_MAX;
+          }
+        }
+        if (inc_rd < best_rd) {
+          best_wm_params = *params;
+          best_rd = inc_rd;
+          center_best_so_far = 0;
+          prev_dir[param_index] = 1;
+          if (param_index < 4) rotzoom_improved = true;
+        } else {
+          prev_dir[param_index] = 0;
+        }
+      } else {
+        // Standard evaluation: test both +step and -step
+        *params = best_wm_params;
+        params->wmmat[param_index] += step_size;
+        delta = params->wmmat[param_index] - base_params.wmmat[param_index];
+        if (abs(delta) > max_warp_delta_value) {
+          inc_rd = UINT64_MAX;
+        } else {
+          if (!mbmi->six_param_warp_model_flag) {
+            params->wmmat[4] = -params->wmmat[3];
+            params->wmmat[5] = params->wmmat[2];
+          }
+          valid = av2_is_warp_model_reduced(params);
+          av2_get_shear_params(params, sf);
 
-      // Pick the best parameter value at this level
-      if (inc_rd < best_rd) {
-        if (dec_rd < inc_rd) {
-          // Decreasing is best
+          if (valid) {
+            av2_set_warp_translation(mi_row, mi_col, bsize, center_mv.as_mv,
+                                     params);
+            rate = warp_precision_idx_rate +
+                   av2_cost_model_param(mbmi, mode_costs, step_size,
+                                        max_coded_index, &base_params);
+            sse = compute_motion_cost(xd, cm, ms_params, bsize, best_mv,
+                                      can_refine_mv);
+            inc_rd = sse + (int)ROUND_POWER_OF_TWO_64(
+                               (int64_t)rate * error_per_bit,
+                               RDDIV_BITS + AV2_PROB_COST_SHIFT -
+                                   RD_EPB_SHIFT + PIXEL_TRANSFORM_ERROR_SCALE);
+          } else {
+            inc_rd = UINT64_MAX;
+          }
+        }
+        WarpedMotionParams inc_params = *params;
+
+        *params = best_wm_params;
+        params->wmmat[param_index] -= step_size;
+        delta = params->wmmat[param_index] - base_params.wmmat[param_index];
+        if (abs(delta) > max_warp_delta_value) {
+          dec_rd = UINT64_MAX;
+        } else {
+          if (!mbmi->six_param_warp_model_flag) {
+            params->wmmat[4] = -params->wmmat[3];
+            params->wmmat[5] = params->wmmat[2];
+          }
+          valid = av2_is_warp_model_reduced(params);
+          av2_get_shear_params(params, sf);
+          if (valid) {
+            av2_set_warp_translation(mi_row, mi_col, bsize, center_mv.as_mv,
+                                     params);
+            rate = warp_precision_idx_rate +
+                   av2_cost_model_param(mbmi, mode_costs, step_size,
+                                        max_coded_index, &base_params);
+            sse = compute_motion_cost(xd, cm, ms_params, bsize, best_mv,
+                                      can_refine_mv);
+            dec_rd = sse + (int)ROUND_POWER_OF_TWO_64(
+                               (int64_t)rate * error_per_bit,
+                               RDDIV_BITS + AV2_PROB_COST_SHIFT -
+                                   RD_EPB_SHIFT + PIXEL_TRANSFORM_ERROR_SCALE);
+          } else {
+            dec_rd = UINT64_MAX;
+          }
+        }
+        WarpedMotionParams dec_params = *params;
+
+        if (inc_rd < best_rd) {
+          if (dec_rd < inc_rd) {
+            best_wm_params = dec_params;
+            best_rd = dec_rd;
+            center_best_so_far = 0;
+            prev_dir[param_index] = -1;
+            if (param_index < 4) rotzoom_improved = true;
+          } else {
+            best_wm_params = inc_params;
+            best_rd = inc_rd;
+            center_best_so_far = 0;
+            prev_dir[param_index] = 1;
+            if (param_index < 4) rotzoom_improved = true;
+          }
+        } else if (dec_rd < best_rd) {
           best_wm_params = dec_params;
           best_rd = dec_rd;
           center_best_so_far = 0;
+          prev_dir[param_index] = -1;
+          if (param_index < 4) rotzoom_improved = true;
         } else {
-          // Increasing is best
-          best_wm_params = inc_params;
-          best_rd = inc_rd;
-          center_best_so_far = 0;
+          prev_dir[param_index] = 0;
         }
-      } else if (dec_rd < best_rd) {
-        // Decreasing is best
-        best_wm_params = dec_params;
-        best_rd = dec_rd;
-        center_best_so_far = 0;
-      } else {
-        // Current is best
-        // No need to change anything
       }
     }
 
