@@ -411,6 +411,8 @@ const arg_def_t *av2_key_val_args[] = {
   &g_av2_codec_arg_defs.warp_delta_max_iter,
   &g_av2_codec_arg_defs.warp_delta_step,
   &g_av2_codec_arg_defs.warp_delta_step_mask,
+  &g_av2_codec_arg_defs.max_allowed_primary_tx,
+  &g_av2_codec_arg_defs.dis_jmvd_scale,
   &g_av2_codec_arg_defs.vbr_corpus_complexity_lap,
   NULL,
 };

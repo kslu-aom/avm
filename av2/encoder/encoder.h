@@ -360,6 +360,7 @@ typedef struct {
    */
   bool enable_cctx;
   int ist_set_num;
+  int max_allowed_primary_tx;
 } TxfmSizeTypeCfg;
 
 /*!
@@ -626,6 +627,7 @@ typedef struct {
   int interp_filter_mode;
   int max_fr_mv_prec;
   int min_blk_mv_prec;
+  int dis_jmvd_scale;
 } MotionModeCfg;
 
 typedef struct {

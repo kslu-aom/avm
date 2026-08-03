@@ -306,6 +306,8 @@ typedef struct av2_codec_arg_definitions {
   arg_def_t max_fr_mv_prec;
   arg_def_t min_blk_mv_prec;
   arg_def_t ist_set_num;
+  arg_def_t max_allowed_primary_tx;
+  arg_def_t dis_jmvd_scale;
 } av2_codec_arg_definitions_t;
 
 extern const av2_codec_arg_definitions_t g_av2_codec_arg_defs;

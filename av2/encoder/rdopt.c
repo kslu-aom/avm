@@ -5406,6 +5406,12 @@ static int64_t handle_inter_mode(
 
   for (int scale_index = 0; scale_index < jmvd_scaling_factor_num;
        ++scale_index) {
+    if (scale_index > 0) {
+      if (cpi->oxcf.motion_mode_cfg.dis_jmvd_scale == 1) continue;
+      if (cpi->oxcf.motion_mode_cfg.dis_jmvd_scale == 2 &&
+          mbmi->mode == JOINT_NEWMV_OPTFLOW)
+        continue;
+    }
     mbmi->jmvd_scale_mode = scale_index;
     if (is_joint_amvd_coding_mode(mbmi->mode, mbmi->use_amvd)) {
       if (scale_index > JOINT_AMVD_SCALE_FACTOR_CNT - 1) continue;

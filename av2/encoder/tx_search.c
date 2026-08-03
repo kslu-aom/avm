@@ -1593,8 +1593,9 @@ static AVM_INLINE void get_energy_distribution_finer(const int16_t *diff,
   for (i = 0; i < esq_h - 1; i++) verdist[i] *= e_recip;
 }
 
-static void prune_tx_2D(MACROBLOCK *x, BLOCK_SIZE bsize, TX_SIZE tx_size,
-                        int blk_row, int blk_col, TxSetType tx_set_type,
+static void prune_tx_2D(const AV2_COMP *cpi, MACROBLOCK *x, BLOCK_SIZE bsize,
+                        TX_SIZE tx_size, int blk_row, int blk_col,
+                        TxSetType tx_set_type,
                         TX_TYPE_PRUNE_MODE prune_2d_txfm_mode, int *txk_map,
                         uint16_t *allowed_tx_mask) {
   int tx_type_table_2D[16] = {
@@ -1715,6 +1716,13 @@ static void prune_tx_2D(MACROBLOCK *x, BLOCK_SIZE bsize, TX_SIZE tx_size,
     for (; tx_idx < TX_TYPES; tx_idx++)
       allow_bitmask &= ~(1 << tx_type_table_2D[tx_idx]);
   }
+
+  if (cpi->oxcf.txfm_cfg.max_allowed_primary_tx) {
+    for (int tx_idx = cpi->oxcf.txfm_cfg.max_allowed_primary_tx;
+         tx_idx < TX_TYPES; tx_idx++)
+      allow_bitmask &= ~(1 << tx_type_table_2D[tx_idx]);
+  }
+
   memcpy(txk_map, tx_type_table_2D, sizeof(tx_type_table_2D));
   *allowed_tx_mask = allow_bitmask;
 }
@@ -1881,7 +1889,7 @@ get_tx_mask(const AV2_COMP *cpi, MACROBLOCK *x, int plane, int block,
       // !fast_tx_search && txk_end != txk_start && plane == 0
       if (txfm_params->prune_2d_txfm_mode >= TX_TYPE_PRUNE_1 && is_inter &&
           num_allowed > allowed_tx_count) {
-        prune_tx_2D(x, plane_bsize, tx_size, blk_row, blk_col, tx_set_type,
+        prune_tx_2D(cpi, x, plane_bsize, tx_size, blk_row, blk_col, tx_set_type,
                     txfm_params->prune_2d_txfm_mode, txk_map, &allowed_tx_mask);
       }
     }

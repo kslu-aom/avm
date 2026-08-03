@@ -930,4 +930,10 @@ const av2_codec_arg_definitions_t g_av2_codec_arg_defs = {
   .ist_set_num =
       ARG_DEF(NULL, "ist-set-num", 1,
               "When not 0, indicates the number of supported IST sets"),
+  .max_allowed_primary_tx =
+      ARG_DEF(NULL, "max-allowed-primary-tx", 1,
+              "Maximum number of allowed primary tx types from ML pruning."),
+  .dis_jmvd_scale =
+      ARG_DEF(NULL, "dis-jmvd-scale", 1,
+              "Disable JMVD scale mode (1: all joint modes, 2: JOINT_NEWMV_OPTFLOW only)"),
 };

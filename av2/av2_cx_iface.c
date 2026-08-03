@@ -256,6 +256,8 @@ struct av2_extracfg {
   int max_fr_mv_prec;
   int min_blk_mv_prec;
   int ist_set_num;
+  int max_allowed_primary_tx;
+  int dis_jmvd_scale;
 };
 
 // Example subgop configs. Currently not used by default.
@@ -596,6 +598,8 @@ static struct av2_extracfg default_extra_cfg = {
   0,   // max_fr_mv_prec
   0,   // min_blk_mv_prec
   0,   // ist_set_num
+  0,   // max_allowed_primary_tx
+  0,   // dis_jmvd_scale
 };
 // clang-format on
 
@@ -1679,6 +1683,7 @@ static avm_codec_err_t set_encoder_config(AV2EncoderConfig *oxcf,
   oxcf->motion_mode_cfg.interp_filter_mode = extra_cfg->interp_filter_mode;
   oxcf->motion_mode_cfg.max_fr_mv_prec = extra_cfg->max_fr_mv_prec;
   oxcf->motion_mode_cfg.min_blk_mv_prec = extra_cfg->min_blk_mv_prec;
+  oxcf->motion_mode_cfg.dis_jmvd_scale = extra_cfg->dis_jmvd_scale;
 
   // Set partition related configuration.
   part_cfg->disable_ml_partition_speed_features =
@@ -1722,6 +1727,7 @@ static avm_codec_err_t set_encoder_config(AV2EncoderConfig *oxcf,
       extra_cfg->disable_ml_transform_speed_features;
   txfm_cfg->enable_tx_partition = extra_cfg->enable_tx_partition;
   txfm_cfg->ist_set_num = extra_cfg->ist_set_num;
+  txfm_cfg->max_allowed_primary_tx = extra_cfg->max_allowed_primary_tx;
   txfm_cfg->enable_ist = extra_cfg->enable_ist && !extra_cfg->lossless;
   txfm_cfg->enable_inter_ist =
       extra_cfg->enable_inter_ist && !extra_cfg->lossless;
@@ -4647,6 +4653,14 @@ static avm_codec_err_t encoder_set_option(avm_codec_alg_priv_t *ctx,
   } else if (avm_arg_match_helper(&arg, &g_av2_codec_arg_defs.ist_set_num,
                                   argv, err_string)) {
     extra_cfg.ist_set_num = avm_arg_parse_int_helper(&arg, err_string);
+  } else if (avm_arg_match_helper(
+                 &arg, &g_av2_codec_arg_defs.max_allowed_primary_tx, argv,
+                 err_string)) {
+    extra_cfg.max_allowed_primary_tx =
+        avm_arg_parse_int_helper(&arg, err_string);
+  } else if (avm_arg_match_helper(&arg, &g_av2_codec_arg_defs.dis_jmvd_scale,
+                                  argv, err_string)) {
+    extra_cfg.dis_jmvd_scale = avm_arg_parse_int_helper(&arg, err_string);
   } else {
     match = 0;
     snprintf(err_string, ARG_ERR_MSG_MAX_LEN, "Cannot find avm option %s",
