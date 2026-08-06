@@ -18,6 +18,14 @@
 #include "av2/encoder/mcomp.h"
 #include "av2/encoder/encodemb.h"
 
+#define FAST_WARP_DELTA_ROUGH_STAGE_WRL 1
+#define FAST_WARP_DELTA_ROUGH_STAGE_ITER 0
+#define FAST_WARP_DELTA_ROUGH_STAGE_STEP 1
+#define FAST_WARP_DELTA_ROUGH_STAGE_INTERINTRA 1
+#define FAST_WARP_DELTA_ROUGH_STAGE_DIR_STEP 0
+#define FAST_WARP_DELTA_ROUGH_STAGE_ROTZOOM_IMP 0
+#define FAST_WARP_DELTA_ROUGH_STAGE_VAR_PRUNE 1
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -599,6 +607,9 @@ typedef struct INTER_MODE_SPEED_FEATURES {
   // and non-NEAR_NEARMV_OPTFLOW modes, the evaluation is limited to top N
   // compound reference combinations in priority order.
   int reduce_comp_refs;
+
+  // Simplifies warp delta search in rough mode stage (speed >= 1)
+  int fast_warp_delta_rough_stage;
 
   // Prune reference frames for ALTREF
   int alt_ref_search_fp;

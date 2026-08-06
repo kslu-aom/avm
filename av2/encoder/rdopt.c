@@ -2576,6 +2576,18 @@ static AVM_INLINE int handle_warp_delta_mode(
     return -1;
   }
 
+#if FAST_WARP_DELTA_ROUGH_STAGE_VAR_PRUNE
+  if (cpi->sf.inter_sf.fast_warp_delta_rough_stage >= 2 ||
+      (cpi->sf.inter_sf.fast_warp_delta_rough_stage >= 1 &&
+       !eval_motion_mode)) {
+    const unsigned int var_thresh =
+        (cpi->sf.inter_sf.fast_warp_delta_rough_stage >= 3) ? 64 : 32;
+    if (x->source_variance != UINT_MAX && x->source_variance < var_thresh) {
+      return -1;
+    }
+  }
+#endif
+
   int_mv wrl_ref_mv = mbmi->mv[0];
   mbmi->warp_inter_intra = 0;
 
@@ -3336,8 +3348,20 @@ static int64_t motion_mode_rd(
           1 + (allow_warp_inter_intra(&base_mbmi) && !is_low_delay_enc);
       for (int warp_inter_intra = 0; warp_inter_intra < warp_inter_intra_limit;
            warp_inter_intra++) {
+#if FAST_WARP_DELTA_ROUGH_STAGE_INTERINTRA
+        if (cpi->sf.inter_sf.fast_warp_delta_rough_stage && !eval_motion_mode &&
+            warp_inter_intra)
+          continue;
+#endif
         for (int warp_ref_idx = 0; warp_ref_idx < warp_ref_idx_limit;
              warp_ref_idx++) {
+#if FAST_WARP_DELTA_ROUGH_STAGE_WRL
+          if ((cpi->sf.inter_sf.fast_warp_delta_rough_stage >= 3 ||
+               (cpi->sf.inter_sf.fast_warp_delta_rough_stage >= 1 &&
+                !eval_motion_mode)) &&
+              warp_ref_idx >= 2)
+            continue;
+#endif
           // Search warp interintra in winner mode for remaing wrl indices
           // if warp interintra is selected in rough mode
           if (cpi->sf.inter_sf.enable_warp_inter_intra_in_winner &&
@@ -3345,7 +3369,7 @@ static int64_t motion_mode_rd(
             continue;
           assert(IMPLIES(cpi->sf.inter_sf.enable_warp_inter_intra_in_winner &&
                              !eval_motion_mode,
-                         (!warp_inter_intra || warp_ref_idx >= 2)));
+                          (!warp_inter_intra || warp_ref_idx >= 2)));
           for (int warpmv_with_mvd_flag = 0; warpmv_with_mvd_flag < 2;
                warpmv_with_mvd_flag++) {
             const MotionModeTrialParams trial = {
@@ -3370,9 +3394,23 @@ static int64_t motion_mode_rd(
       ctx.prev_best_models = &prev_best_models;
       for (int warp_ref_idx = 0; warp_ref_idx < warp_ref_idx_limit;
            warp_ref_idx++) {
+#if FAST_WARP_DELTA_ROUGH_STAGE_WRL
+        if ((cpi->sf.inter_sf.fast_warp_delta_rough_stage >= 3 ||
+             (cpi->sf.inter_sf.fast_warp_delta_rough_stage >= 1 &&
+              !eval_motion_mode)) &&
+            warp_ref_idx >= 2)
+          continue;
+#endif
         for (int warp_precision_idx = 0;
              warp_precision_idx < NUM_WARP_PRECISION_MODES;
              warp_precision_idx++) {
+#if FAST_WARP_DELTA_ROUGH_STAGE_STEP
+          if ((cpi->sf.inter_sf.fast_warp_delta_rough_stage >= 2 ||
+               (cpi->sf.inter_sf.fast_warp_delta_rough_stage >= 1 &&
+                !eval_motion_mode)) &&
+              warp_precision_idx > 1)
+            continue;
+#endif
           const MotionModeTrialParams trial = {
             mode_index, warp_ref_idx,      warp_ref_idx_limit, 0,
             0,          warp_precision_idx

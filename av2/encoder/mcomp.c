@@ -64,6 +64,12 @@ get_faster_search_method(SEARCH_METHODS search_method) {
   }
 }
 
+static AVM_INLINE bool fast_warp_delta_rough_stage_active(
+    const AV2_COMP *cpi, int eval_motion_mode, int min_stage) {
+  const int stage = cpi->sf.inter_sf.fast_warp_delta_rough_stage;
+  return stage >= min_stage || (stage >= 1 && !eval_motion_mode);
+}
+
 void av2_make_default_fullpel_ms_params(
     FULLPEL_MOTION_SEARCH_PARAMS *ms_params, const struct AV2_COMP *cpi,
     const MACROBLOCK *x, BLOCK_SIZE bsize, const MV *ref_mv,
@@ -5119,6 +5125,10 @@ int av2_pick_warp_delta(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
   int max_coded_index = 0;
   get_warp_model_steps(mbmi, &step_size, &max_coded_index);
   const int max_warp_delta_value = step_size * max_coded_index;
+  const bool use_rough_stage_iter =
+      fast_warp_delta_rough_stage_active(cpi, eval_motion_mode, 2);
+  const bool use_rough_stage_dir_step = use_rough_stage_iter;
+  const bool use_rough_stage_rotzoom_imp = use_rough_stage_iter;
   WarpedMotionParams start_params = base_params;
 
   WarpedMotionParams prev_wm_params;
@@ -5179,6 +5189,11 @@ int av2_pick_warp_delta(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
   if (enable_fast_model_search) {
     number_of_iterations = 2;
   }
+#if FAST_WARP_DELTA_ROUGH_STAGE_ITER
+  if (use_rough_stage_iter) {
+    number_of_iterations = AVMMIN(number_of_iterations, 2);
+  }
+#endif
 
   // Set up initial model by copying global motion model
   // and adjusting for the chosen motion vector
@@ -5217,6 +5232,9 @@ int av2_pick_warp_delta(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
   // Refine model, by making a few passes through the available
   // parameters and trying to increase/decrease them
 
+  int prev_dir[6] = { 0 };
+  bool rotzoom_improved = false;
+
   for (int iter = 0; iter < number_of_iterations; iter++) {
     int center_best_so_far = 1;
 
@@ -5229,14 +5247,32 @@ int av2_pick_warp_delta(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
       center_mv.as_mv = *best_mv;
     }
 
-    for (int param_index = 2;
-         param_index < (mbmi->six_param_warp_model_flag ? 6 : 4);
-         param_index++) {
+    int max_param_index = (mbmi->six_param_warp_model_flag ? 6 : 4);
+#if FAST_WARP_DELTA_ROUGH_STAGE_ROTZOOM_IMP
+    if (use_rough_stage_rotzoom_imp && mbmi->six_param_warp_model_flag &&
+        !rotzoom_improved && iter > 0) {
+      max_param_index = 4;
+    }
+#endif
+
+    for (int param_index = 2; param_index < max_param_index; param_index++) {
       const WarpedMotionParams center_params = best_wm_params;
       // Try increasing and decreasing the parameter
-      const int dirs[2] = { 1, -1 };
+      int dirs[2] = { 1, -1 };
+#if FAST_WARP_DELTA_ROUGH_STAGE_DIR_STEP
+      int eval_dir = 0;
+      if (use_rough_stage_dir_step && iter > 0) {
+        eval_dir = prev_dir[param_index];
+        if (eval_dir == -1) {
+          dirs[0] = -1;
+          dirs[1] = 1;
+        }
+      }
+      prev_dir[param_index] = 0;
+#endif
+
       for (int d = 0; d < 2; d++) {
-        const int dir = dirs[d];
+        int dir = dirs[d];
         *params = center_params;
         params->wmmat[param_index] += dir * step_size;
         delta = params->wmmat[param_index] - base_params.wmmat[param_index];
@@ -5269,6 +5305,15 @@ int av2_pick_warp_delta(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
           best_wm_params = *params;
           best_rd = cand_rd;
           center_best_so_far = 0;
+#if FAST_WARP_DELTA_ROUGH_STAGE_DIR_STEP
+          prev_dir[param_index] = dir;
+#endif
+#if FAST_WARP_DELTA_ROUGH_STAGE_ROTZOOM_IMP
+          if (param_index < 4) rotzoom_improved = true;
+#endif
+#if FAST_WARP_DELTA_ROUGH_STAGE_DIR_STEP
+          if (eval_dir != 0) break;
+#endif
         }
       }
     }
