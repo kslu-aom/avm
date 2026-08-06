@@ -2640,8 +2640,9 @@ static AVM_INLINE int handle_warp_delta_mode(
     if (use_six_param_in_winner ||
         !cpi->sf.inter_sf.enable_six_param_warp_in_winner_mode)
       valid = av2_pick_warp_delta(
-          cm, xd, mbmi, &ms_params, &x->mode_costs, prev_best_models,
-          mbmi_ext->warp_param_stack[av2_ref_frame_type(mbmi->ref_frame)]);
+          cpi, xd, mbmi, &ms_params, &x->mode_costs, prev_best_models,
+          mbmi_ext->warp_param_stack[av2_ref_frame_type(mbmi->ref_frame)],
+          eval_motion_mode);
   }
 
   if (!valid) return -1;
