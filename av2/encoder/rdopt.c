@@ -2577,11 +2577,9 @@ static AVM_INLINE int handle_warp_delta_mode(
   }
 
 #if FAST_WARP_DELTA_ROUGH_STAGE_VAR_PRUNE
-  if (cpi->sf.inter_sf.fast_warp_delta_rough_stage >= 2 ||
-      (cpi->sf.inter_sf.fast_warp_delta_rough_stage >= 1 &&
-       !eval_motion_mode)) {
+  if (cpi->sf.inter_sf.fast_warp_delta_rough_stage >= 1) {
     const unsigned int var_thresh =
-        (cpi->sf.inter_sf.fast_warp_delta_rough_stage >= 3) ? 64 : 32;
+        (cpi->sf.inter_sf.fast_warp_delta_rough_stage >= 2) ? 64 : 32;
     if (x->source_variance != UINT_MAX && x->source_variance < var_thresh) {
       return -1;
     }
@@ -3356,7 +3354,7 @@ static int64_t motion_mode_rd(
         for (int warp_ref_idx = 0; warp_ref_idx < warp_ref_idx_limit;
              warp_ref_idx++) {
 #if FAST_WARP_DELTA_ROUGH_STAGE_WRL
-          if ((cpi->sf.inter_sf.fast_warp_delta_rough_stage >= 3 ||
+          if ((cpi->sf.inter_sf.fast_warp_delta_rough_stage >= 2 ||
                (cpi->sf.inter_sf.fast_warp_delta_rough_stage >= 1 &&
                 !eval_motion_mode)) &&
               warp_ref_idx >= 2)
@@ -3395,7 +3393,7 @@ static int64_t motion_mode_rd(
       for (int warp_ref_idx = 0; warp_ref_idx < warp_ref_idx_limit;
            warp_ref_idx++) {
 #if FAST_WARP_DELTA_ROUGH_STAGE_WRL
-        if ((cpi->sf.inter_sf.fast_warp_delta_rough_stage >= 3 ||
+        if ((cpi->sf.inter_sf.fast_warp_delta_rough_stage >= 2 ||
              (cpi->sf.inter_sf.fast_warp_delta_rough_stage >= 1 &&
               !eval_motion_mode)) &&
             warp_ref_idx >= 2)
@@ -3405,9 +3403,7 @@ static int64_t motion_mode_rd(
              warp_precision_idx < NUM_WARP_PRECISION_MODES;
              warp_precision_idx++) {
 #if FAST_WARP_DELTA_ROUGH_STAGE_STEP
-          if ((cpi->sf.inter_sf.fast_warp_delta_rough_stage >= 2 ||
-               (cpi->sf.inter_sf.fast_warp_delta_rough_stage >= 1 &&
-                !eval_motion_mode)) &&
+          if (cpi->sf.inter_sf.fast_warp_delta_rough_stage >= 1 &&
               warp_precision_idx > 1)
             continue;
 #endif

@@ -508,7 +508,6 @@ static void set_good_speed_features_framesize_independent(
     sf->inter_sf.prune_comp_search_by_single_result = boosted ? 4 : 2;
     sf->inter_sf.skip_repeated_ref_mv = 1;
     sf->inter_sf.skip_repeated_full_newmv = 1;
-    sf->inter_sf.fast_warp_delta_rough_stage = 3;
     // TODO(any): Set this speed feature to 2 after correcting the match
     // criteria by considering tools like OPFL, SMVR.
     sf->inter_sf.reuse_compound_type_data = 0;
