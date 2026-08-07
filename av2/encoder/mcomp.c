@@ -5249,9 +5249,10 @@ int av2_pick_warp_delta(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
 
     int max_param_index = (mbmi->six_param_warp_model_flag ? 6 : 4);
 #if FAST_WARP_DELTA_ROUGH_STAGE_ROTZOOM_IMP
-    if (use_rough_stage_rotzoom_imp && mbmi->six_param_warp_model_flag &&
-        !rotzoom_improved && iter > 0) {
-      max_param_index = 4;
+    if (mbmi->six_param_warp_model_flag) {
+      if (iter == 0 || !rotzoom_improved) {
+        max_param_index = 4;
+      }
     }
 #endif
 
