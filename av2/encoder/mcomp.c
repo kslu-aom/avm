@@ -36,6 +36,9 @@
 
 #include "avm_dsp/binary_codes_writer.h"
 
+#define WARP_DELTA_PRINT_STATS 0
+#define WARP_DELTA_PRINT_SPARSITY_DEFAULT 97
+
 static INLINE void init_ms_buffers(MSBuffers *ms_buffers, const MACROBLOCK *x) {
   ms_buffers->ref = &x->e_mbd.plane[0].pre[0];
   ms_buffers->src = &x->plane[0].src;
@@ -5214,10 +5217,18 @@ int av2_pick_warp_delta(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
                                                  RD_EPB_SHIFT +
                                                  PIXEL_TRANSFORM_ERROR_SCALE);
 
+#if WARP_DELTA_PRINT_STATS
+  const uint64_t initial_rd = best_rd;
+  int actual_iters = 0;
+#endif
+
   // Refine model, by making a few passes through the available
   // parameters and trying to increase/decrease them
 
   for (int iter = 0; iter < number_of_iterations; iter++) {
+#if WARP_DELTA_PRINT_STATS
+    actual_iters = iter + 1;
+#endif
     int center_best_so_far = 1;
 
     if (can_refine_mv && !skip_mv_search) {
@@ -5288,6 +5299,59 @@ int av2_pick_warp_delta(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
   }
 
   mbmi->wm_params[0] = best_wm_params;
+
+#if WARP_DELTA_PRINT_STATS
+  const int search_space_dim = mbmi->six_param_warp_model_flag ? 4 : 2;
+  const int d2 =
+      step_size ? (best_wm_params.wmmat[2] - base_params.wmmat[2]) / step_size
+                : 0;
+  const int d3 =
+      step_size ? (best_wm_params.wmmat[3] - base_params.wmmat[3]) / step_size
+                : 0;
+  const int d4 =
+      step_size ? (best_wm_params.wmmat[4] - base_params.wmmat[4]) / step_size
+                : 0;
+  const int d5 =
+      step_size ? (best_wm_params.wmmat[5] - base_params.wmmat[5]) / step_size
+                : 0;
+
+  static int warp_delta_print_counter = 0;
+  static int warp_delta_sparsity = -1;
+  if (warp_delta_sparsity < 0) {
+    const char *env_sparsity = getenv("WARP_DELTA_PRINT_SPARSITY");
+    if (!env_sparsity) env_sparsity = getenv("WARP_DELTA_SPARSITY");
+    if (env_sparsity) {
+      warp_delta_sparsity = atoi(env_sparsity);
+    } else {
+      warp_delta_sparsity = WARP_DELTA_PRINT_SPARSITY_DEFAULT;
+    }
+  }
+
+  if (warp_delta_sparsity > 0 &&
+      (warp_delta_print_counter++ % warp_delta_sparsity) == 0) {
+    fprintf(
+        stderr,
+        "[WARP_DELTA_SEARCH] mode=%d (%s) ref0=%d warp_ref_idx=%d "
+        "prec_idx=%d six_param=%d dim=%d bsize=%dx%d fast_search=%d "
+        "step=%d max_coded_idx=%d cfg_iters=%d actual_iters=%d "
+        "init_rd=%llu best_rd=%llu rd_gain=%" PRId64
+        " "
+        "coded_deltas=[%d, %d, %d, %d] best_wmmat=[%d, %d, %d, %d] "
+        "base_wmmat=[%d, %d, %d, %d]\n",
+        mbmi->mode,
+        mbmi->mode == WARP_NEWMV ? "WARP_NEWMV"
+                                 : (mbmi->mode == WARPMV ? "WARPMV" : "OTHER"),
+        mbmi->ref_frame[0], mbmi->warp_ref_idx, mbmi->warp_precision_idx,
+        mbmi->six_param_warp_model_flag, search_space_dim,
+        block_size_wide[bsize], block_size_high[bsize],
+        enable_fast_model_search, step_size, max_coded_index,
+        number_of_iterations, actual_iters, (unsigned long long)initial_rd,
+        (unsigned long long)best_rd, (int64_t)initial_rd - (int64_t)best_rd, d2,
+        d3, d4, d5, best_wm_params.wmmat[2], best_wm_params.wmmat[3],
+        best_wm_params.wmmat[4], best_wm_params.wmmat[5], base_params.wmmat[2],
+        base_params.wmmat[3], base_params.wmmat[4], base_params.wmmat[5]);
+  }
+#endif
 
   return 1;
 }
