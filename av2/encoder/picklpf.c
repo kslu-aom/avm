@@ -266,11 +266,11 @@ static int search_filter_offsets(const YV12_BUFFER_CONFIG *sd, AV2_COMP *cpi,
   return best_cost < start_cost ? offset_best : offsets[off_ind];
 }
 
-void av2_pick_filter_level(const YV12_BUFFER_CONFIG *sd, AV2_COMP *cpi,
-                           LPF_PICK_METHOD method) {
+static double pick_filter_level_helper(const YV12_BUFFER_CONFIG *sd,
+                                       AV2_COMP *cpi, LPF_PICK_METHOD method,
+                                       struct loopfilter *const lf) {
   AV2_COMMON *const cm = &cpi->common;
   const int num_planes = av2_num_planes(cm);
-  struct loopfilter *const lf = &cm->lf;
   (void)sd;
 
   cpi->td.mb.rdmult = cpi->rd.RDMULT;
@@ -295,10 +295,13 @@ void av2_pick_filter_level(const YV12_BUFFER_CONFIG *sd, AV2_COMP *cpi,
         cm->seq_params.bit_depth);
   }
 
+  double total_cost = 0;
+
   if (method == LPF_PICK_MINIMAL_LPF) {
     lf->apply_deblocking_filter[0] = 0;
     lf->apply_deblocking_filter[1] = 0;
     lf->apply_deblocking_filter_u = lf->apply_deblocking_filter_v = 0;
+    for (int i = 0; i < num_planes; i++) total_cost += no_deblocking_cost[i];
   } else if (method >= LPF_PICK_FROM_Q) {
     // TODO(chengchen): retrain the model for Y, U, V filter levels
     lf->apply_deblocking_filter[0] = lf->apply_deblocking_filter[1] = 1;
@@ -311,6 +314,7 @@ void av2_pick_filter_level(const YV12_BUFFER_CONFIG *sd, AV2_COMP *cpi,
         0;
     lf->delta_side_luma[0] = lf->delta_side_luma[1] = lf->delta_side_u =
         lf->delta_side_v = 0;
+    for (int i = 0; i < num_planes; i++) total_cost += no_deblocking_cost[i];
   } else {
     // To make sure the df filters are run
     lf->apply_deblocking_filter[0] = 1;
@@ -359,11 +363,15 @@ void av2_pick_filter_level(const YV12_BUFFER_CONFIG *sd, AV2_COMP *cpi,
       lf->apply_deblocking_filter[1] = 0;
       lf->delta_q_luma[0] = lf->delta_side_luma[0] = lf->delta_q_luma[1] =
           lf->delta_side_luma[1] = 0;
+      total_cost += no_deblocking_cost[0];
     } else if (best_single_cost < best_dual_cost) {
       lf->delta_q_luma[0] = last_frame_offsets[0] = best_single_offsets[0];
       lf->delta_side_luma[0] = last_frame_offsets[1] = best_single_offsets[1];
       lf->delta_q_luma[1] = last_frame_offsets[2] = best_single_offsets[2];
       lf->delta_side_luma[1] = last_frame_offsets[3] = best_single_offsets[3];
+      total_cost += best_single_cost;
+    } else {
+      total_cost += best_dual_cost;
     }
 
     if (num_planes > 1) {
@@ -385,6 +393,9 @@ void av2_pick_filter_level(const YV12_BUFFER_CONFIG *sd, AV2_COMP *cpi,
       if (no_deblocking_cost[1] < best_cost_u) {
         lf->apply_deblocking_filter_u = 0;
         lf->delta_q_u = lf->delta_side_u = 0;
+        total_cost += no_deblocking_cost[1];
+      } else {
+        total_cost += best_cost_u;
       }
 
       // Cr
@@ -400,69 +411,106 @@ void av2_pick_filter_level(const YV12_BUFFER_CONFIG *sd, AV2_COMP *cpi,
       if (no_deblocking_cost[2] < best_cost_v) {
         lf->apply_deblocking_filter_v = 0;
         lf->delta_q_v = lf->delta_side_v = 0;
+        total_cost += no_deblocking_cost[2];
+      } else {
+        total_cost += best_cost_v;
       }
 
       // to switch off filters if offsets are zero
       if (!df_quant_from_qindex(cm->quant_params.base_qindex +
-                                    cm->lf.delta_q_luma[0] * DF_DELTA_SCALE,
+                                    lf->delta_q_luma[0] * DF_DELTA_SCALE,
                                 cm->seq_params.bit_depth) ||
           !df_side_from_qindex(cm->quant_params.base_qindex +
-                                   cm->lf.delta_side_luma[0] * DF_DELTA_SCALE,
+                                   lf->delta_side_luma[0] * DF_DELTA_SCALE,
                                cm->seq_params.bit_depth)) {
         lf->apply_deblocking_filter[0] = 0;
-        cm->lf.delta_q_luma[0] = 0;
-        cm->lf.delta_side_luma[0] = 0;
+        lf->delta_q_luma[0] = 0;
+        lf->delta_side_luma[0] = 0;
       }
       if (!df_quant_from_qindex(cm->quant_params.base_qindex +
-                                    cm->lf.delta_q_luma[1] * DF_DELTA_SCALE,
+                                    lf->delta_q_luma[1] * DF_DELTA_SCALE,
                                 cm->seq_params.bit_depth) ||
           !df_side_from_qindex(cm->quant_params.base_qindex +
-                                   cm->lf.delta_side_luma[1] * DF_DELTA_SCALE,
+                                   lf->delta_side_luma[1] * DF_DELTA_SCALE,
                                cm->seq_params.bit_depth)) {
         lf->apply_deblocking_filter[1] = 0;
-        cm->lf.delta_q_luma[1] = 0;
-        cm->lf.delta_side_luma[1] = 0;
+        lf->delta_q_luma[1] = 0;
+        lf->delta_side_luma[1] = 0;
       }
       if (lf->apply_deblocking_filter[0] == 0 &&
           lf->apply_deblocking_filter[1] == 0) {
         lf->apply_deblocking_filter_u = 0;
         lf->apply_deblocking_filter_v = 0;
-        cm->lf.delta_q_u = 0;
-        cm->lf.delta_side_u = 0;
-        cm->lf.delta_q_v = 0;
-        cm->lf.delta_side_v = 0;
+        lf->delta_q_u = 0;
+        lf->delta_side_u = 0;
+        lf->delta_q_v = 0;
+        lf->delta_side_v = 0;
       } else {
         if (!df_quant_from_qindex(cm->quant_params.base_qindex +
                                       cm->quant_params.u_ac_delta_q +
                                       cm->seq_params.base_uv_ac_delta_q +
-                                      cm->lf.delta_q_u * DF_DELTA_SCALE,
+                                      lf->delta_q_u * DF_DELTA_SCALE,
                                   cm->seq_params.bit_depth) ||
             !df_side_from_qindex(cm->quant_params.base_qindex +
                                      cm->quant_params.u_ac_delta_q +
                                      cm->seq_params.base_uv_ac_delta_q +
-                                     cm->lf.delta_side_u * DF_DELTA_SCALE,
+                                     lf->delta_side_u * DF_DELTA_SCALE,
                                  cm->seq_params.bit_depth)) {
           lf->apply_deblocking_filter_u = 0;
-          cm->lf.delta_q_u = 0;
-          cm->lf.delta_side_u = 0;
+          lf->delta_q_u = 0;
+          lf->delta_side_u = 0;
         }
         if (!df_quant_from_qindex(cm->quant_params.base_qindex +
                                       cm->quant_params.v_ac_delta_q +
                                       cm->seq_params.base_uv_ac_delta_q +
-                                      cm->lf.delta_q_v * DF_DELTA_SCALE,
+                                      lf->delta_q_v * DF_DELTA_SCALE,
                                   cm->seq_params.bit_depth) ||
             !df_side_from_qindex(cm->quant_params.base_qindex +
                                      cm->quant_params.v_ac_delta_q +
                                      cm->seq_params.base_uv_ac_delta_q +
-                                     cm->lf.delta_side_v * DF_DELTA_SCALE,
+                                     lf->delta_side_v * DF_DELTA_SCALE,
                                  cm->seq_params.bit_depth)) {
           lf->apply_deblocking_filter_v = 0;
-          cm->lf.delta_q_v = 0;
-          cm->lf.delta_side_v = 0;
+          lf->delta_q_v = 0;
+          lf->delta_side_v = 0;
         }
       }
       // to switch off filters if offsets are zero
     }
+  }
+  cm->lf = *lf;
+  return total_cost;
+}
+
+void av2_pick_filter_level(const YV12_BUFFER_CONFIG *sd, AV2_COMP *cpi,
+                           LPF_PICK_METHOD method) {
+  AV2_COMMON *const cm = &cpi->common;
+  const bool rdo_search_lf_sub_pu =
+      cpi->oxcf.tool_cfg.enable_lf_sub_pu == 2 &&
+      cm->seq_params.enable_lf_sub_pu &&
+      (cm->current_frame.frame_type == INTER_FRAME || frame_is_sframe(cm));
+
+  if (rdo_search_lf_sub_pu) {
+    struct loopfilter lf_off;
+    struct loopfilter lf_on;
+    memset(&lf_off, 0, sizeof(lf_off));
+    memset(&lf_on, 0, sizeof(lf_on));
+
+    cm->features.allow_lf_sub_pu = 0;
+    double cost_off = pick_filter_level_helper(sd, cpi, method, &lf_off);
+
+    cm->features.allow_lf_sub_pu = 1;
+    double cost_on = pick_filter_level_helper(sd, cpi, method, &lf_on);
+
+    if (cost_on < cost_off) {
+      cm->features.allow_lf_sub_pu = 1;
+      cm->lf = lf_on;
+    } else {
+      cm->features.allow_lf_sub_pu = 0;
+      cm->lf = lf_off;
+    }
+  } else {
+    pick_filter_level_helper(sd, cpi, method, &cm->lf);
   }
 }
 

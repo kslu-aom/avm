@@ -528,7 +528,7 @@ void av2_init_seq_coding_tools(AV2_COMP *cpi, SequenceHeader *seq,
   seq->ccso_unit_matches_sb_size = tool_cfg->ccso_unit_matches_sb;
   seq->enable_band_metadata = tool_cfg->enable_band_metadata;
   seq->enable_lf_sub_pu =
-      seq->single_picture_header_flag ? 0 : tool_cfg->enable_lf_sub_pu;
+      seq->single_picture_header_flag ? 0 : (tool_cfg->enable_lf_sub_pu != 0);
   seq->enable_opfl_refine = seq->single_picture_header_flag
                                 ? AVM_OPFL_REFINE_NONE
                                 : tool_cfg->enable_opfl_refine;

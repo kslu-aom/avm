@@ -2123,6 +2123,7 @@ static AVM_INLINE void encode_frame_internal(AV2_COMP *cpi) {
   const int sub_pu_qp_thr =
       SUB_PU_QTHR + (cm->seq_params.bit_depth - AVM_BITS_8) * SUB_PU_BD_FACTOR;
   if (cm->seq_params.enable_lf_sub_pu &&
+      (cpi->oxcf.tool_cfg.enable_lf_sub_pu == 1) &&
       (cm->quant_params.base_qindex >= sub_pu_qp_thr) &&
       (cm->current_frame.frame_type == INTER_FRAME || frame_is_sframe(cm)))
     cm->features.allow_lf_sub_pu = 1;

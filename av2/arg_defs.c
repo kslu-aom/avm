@@ -380,7 +380,7 @@ const av2_codec_arg_definitions_t g_av2_codec_arg_defs = {
               "Enable banding metadata (0: false (default), 1: true)"),
   .enable_lf_sub_pu = ARG_DEF(NULL, "enable-lf-sub-pu", 1,
                               "Enable the deblocking filter on sub prediction "
-                              "block (0: false, 1: true (default))"),
+                              "block (0: false, 1: true (default), 2: RDO search)"),
   .disable_ml_partition_speed_features =
       ARG_DEF(NULL, "disable-ml-partition-speed-features", 1,
               "Disable ML partition speed features "

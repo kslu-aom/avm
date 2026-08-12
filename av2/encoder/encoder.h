@@ -856,7 +856,7 @@ typedef struct {
   int ccso_unit_matches_sb;
   // Indicates if banding metadata should be enabled.
   bool enable_band_metadata;
-  bool enable_lf_sub_pu;
+  int enable_lf_sub_pu;
   // Indicates if deblocking on sub block should be enabled.
   // Indicates if adaptive MVD resolution should be enabled.
   bool enable_adaptive_mvd;
