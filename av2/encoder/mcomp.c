@@ -4913,8 +4913,8 @@ uint8_t need_mv_adjustment(MACROBLOCKD *xd, const AV2_COMMON *const cm,
   return (last_sign == sum_parity) ? 0 : 1;
 }
 
-#define MAX_WARP_DELTA_ITERS_EXT 14
-#define MAX_WARP_DELTA_ITERS 8
+#define MAX_WARP_DELTA_ITERS_EXT 9
+#define MAX_WARP_DELTA_ITERS 5
 // This function is used to search the translational MV part of the warp model
 // and only invoked when delta parameters are signaled for warp-delta mode.
 static void refine_translational_mv(
