@@ -129,6 +129,7 @@ int parse_cfg(const char *file, cfg_options_t *config) {
     GET_PARAMS(enable_warp_delta);
     GET_PARAMS(enable_six_param_warp_delta);
     GET_PARAMS(enable_warp_extend);
+    GET_PARAMS(enable_warp_newmv_delta);
     GET_PARAMS(enable_diff_wtd_comp);
     GET_PARAMS(enable_interintra_comp);
     GET_PARAMS(enable_masked_comp);

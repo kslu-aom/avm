@@ -457,6 +457,10 @@ typedef struct cfg_options {
    *
    */
   unsigned int enable_warp_extend;
+  /*!\brief enable warp delta in WARP_NEWMV mode
+   *
+   */
+  unsigned int enable_warp_newmv_delta;
 
   /*!\brief enable global motion
    *

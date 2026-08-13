@@ -849,6 +849,7 @@ static AVM_INLINE void init_inter_sf(INTER_MODE_SPEED_FEATURES *inter_sf) {
   inter_sf->prune_refinemv_by_ref_idx = 0;
   inter_sf->prune_interintra_by_ref_idx = 0;
   inter_sf->prune_warp_delta_by_ref_idx = 0;
+  inter_sf->prune_warp_delta_in_warp_newmv = 0;
   inter_sf->prune_comp_using_best_single_mode_ref = 0;
   inter_sf->prune_mode_search_simple_translation = 0;
   inter_sf->prune_comp_type_by_comp_avg = 0;
@@ -1193,6 +1194,13 @@ void av2_set_speed_features_framesize_independent(AV2_COMP *cpi, int speed) {
     set_good_speed_features_framesize_independent(cpi, sf, speed);
   } else if (oxcf->mode == REALTIME) {
     set_rt_speed_features_framesize_independent(cpi, sf, speed);
+  }
+
+  sf->inter_sf.prune_warp_delta_in_warp_newmv =
+      !cpi->oxcf.motion_mode_cfg.enable_warp_newmv_delta;
+  const char *env_newmv_delta = getenv("ENABLE_WARP_NEWMV_DELTA");
+  if (env_newmv_delta) {
+    sf->inter_sf.prune_warp_delta_in_warp_newmv = !atoi(env_newmv_delta);
   }
 
   if (oxcf->mode == GOOD && cpi->oxcf.enable_low_complexity_decode) {

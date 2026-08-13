@@ -568,6 +568,9 @@ const av2_codec_arg_definitions_t g_av2_codec_arg_defs = {
   .enable_warp_extend = ARG_DEF(NULL, "enable-warp-extend", 1,
                                 "Enable warp extension "
                                 "(0: false, 1: true (default))"),
+  .enable_warp_newmv_delta = ARG_DEF(NULL, "enable-warp-newmv-delta", 1,
+                                     "Enable warp delta in WARP_NEWMV mode "
+                                     "(0: false, 1: true (default))"),
   .enable_intra_dip = ARG_DEF(NULL, "enable-intra-dip", 1,
                               "Enable intra data-driven prediction mode "
                               "(0: false, 1: true (default))"),

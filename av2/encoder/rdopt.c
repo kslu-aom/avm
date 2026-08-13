@@ -2605,6 +2605,10 @@ static AVM_INLINE int handle_warp_delta_mode(
                                     mbmi->pb_mv_precision, 0, NULL);
   int valid = 0;
 
+  if (mbmi->mode == WARP_NEWMV &&
+      cpi->sf.inter_sf.prune_warp_delta_in_warp_newmv)
+    return -1;
+
   mbmi->six_param_warp_model_flag = 0;
   if (!allow_warp_parameter_signaling(cm, mbmi)) {
     if (mbmi->warp_precision_idx) return -1;
@@ -3007,6 +3011,9 @@ static AVM_INLINE int evaluate_motion_mode_trial(
       return -1;
     assert(mbmi->motion_mode == INTERINTRA);
   } else if (mbmi->motion_mode == WARP_DELTA) {
+    if (cpi->sf.inter_sf.prune_warp_delta_in_warp_newmv &&
+        mbmi->mode == WARP_NEWMV)
+      return -1;
     if (cpi->sf.inter_sf.prune_warp_delta_by_ref_idx && mbmi->ref_frame[0] > 2)
       return -1;
     if (handle_warp_delta_mode(cpi, x, bsize, mbmi, mbmi_ext, args,
@@ -3365,6 +3372,7 @@ static int64_t motion_mode_rd(
       // WARP_DELTA + WARP_NEWMV: iterate ref_idx × precision
       assert(base_mbmi.mode == WARP_NEWMV);
       assert(mode_index == WARP_DELTA);
+      if (cpi->sf.inter_sf.prune_warp_delta_in_warp_newmv) continue;
       warp_mode_info_array prev_best_models;
       reset_warp_stats_buffer(&prev_best_models);
       ctx.prev_best_models = &prev_best_models;

@@ -694,6 +694,9 @@ typedef struct INTER_MODE_SPEED_FEATURES {
   // speed >= 1.
   int prune_warp_delta_by_ref_idx;
 
+  // Prune/disable WARP_DELTA search specifically in WARP_NEWMV mode.
+  int prune_warp_delta_in_warp_newmv;
+
   // Skip extended compound mode when ref frame corresponding to NEWMV does not
   // have NEWMV as single mode winner.
   // 0 : no pruning

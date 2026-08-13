@@ -340,6 +340,7 @@ const arg_def_t *av2_key_val_args[] = {
   &g_av2_codec_arg_defs.enable_warp_delta,
   &g_av2_codec_arg_defs.enable_warped_motion,
   &g_av2_codec_arg_defs.enable_warp_extend,
+  &g_av2_codec_arg_defs.enable_warp_newmv_delta,
   &g_av2_codec_arg_defs.enable_wiener_nonsep,
   &g_av2_codec_arg_defs.erp_pruning_level,
   &g_av2_codec_arg_defs.explicit_ref_frame_map,
@@ -585,6 +586,7 @@ static void init_config(cfg_options_t *config) {
   config->enable_warp_delta = 1;
   config->enable_six_param_warp_delta = 1;
   config->enable_warp_extend = 1;
+  config->enable_warp_newmv_delta = 1;
   config->enable_global_motion = 1;
   config->enable_skip_mode = 1;
   config->enable_diff_wtd_comp = 1;
@@ -1487,10 +1489,12 @@ static void show_stream_config(struct stream_state *stream,
   if (encoder_cfg->enable_warped_motion) {
     fprintf(stdout,
             "                               : WARP_CAUSAL (%d), "
-            "WARP_DELTA (%d), Six-param-warp-delta (%d), WARP_EXTEND (%d)\n",
+            "WARP_DELTA (%d), Six-param-warp-delta (%d), WARP_EXTEND (%d), "
+            "WARP_NEWMV_DELTA (%d)\n",
             encoder_cfg->enable_warp_causal, encoder_cfg->enable_warp_delta,
             encoder_cfg->enable_six_param_warp_delta,
-            encoder_cfg->enable_warp_extend);
+            encoder_cfg->enable_warp_extend,
+            encoder_cfg->enable_warp_newmv_delta);
   }
 
   fprintf(stdout,

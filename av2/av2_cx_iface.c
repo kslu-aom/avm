@@ -183,6 +183,7 @@ struct av2_extracfg {
   int enable_six_param_warp_delta;  // enable explicit six-parameter warp models
                                     // for sequence
   int enable_warp_extend;           // enable warp extension for sequence
+  int enable_warp_newmv_delta;      // enable warp delta in WARP_NEWMV mode
   int enable_intra_dip;     // enable intra DIP (data-driven intra) sequence
   int enable_smooth_intra;  // enable smooth intra modes for sequence
   int enable_paeth_intra;   // enable Paeth intra mode for sequence
@@ -510,6 +511,7 @@ static struct av2_extracfg default_extra_cfg = {
   1,  // enable_warp_delta at sequence level
   1,    // enable_six_param_warp_delta at sequence level
   1,    // enable_warp_extend at sequence level
+  1,    // enable_warp_newmv_delta
   1,    // enable_intra_dip at sequence level
   1,    // enable smooth intra modes usage for sequence
   1,    // enable Paeth intra mode usage for sequence
@@ -990,6 +992,7 @@ static void update_encoder_config(cfg_options_t *cfg,
   cfg->enable_warp_delta = extra_cfg->enable_warp_delta;
   cfg->enable_six_param_warp_delta = extra_cfg->enable_six_param_warp_delta;
   cfg->enable_warp_extend = extra_cfg->enable_warp_extend;
+  cfg->enable_warp_newmv_delta = extra_cfg->enable_warp_newmv_delta;
   cfg->enable_intra_dip = extra_cfg->enable_intra_dip;
   cfg->enable_smooth_intra = extra_cfg->enable_smooth_intra;
   cfg->enable_paeth_intra = extra_cfg->enable_paeth_intra;
@@ -1110,6 +1113,7 @@ static void update_default_encoder_config(const cfg_options_t *cfg,
   extra_cfg->enable_warp_delta = cfg->enable_warp_delta;
   extra_cfg->enable_six_param_warp_delta = cfg->enable_six_param_warp_delta;
   extra_cfg->enable_warp_extend = cfg->enable_warp_extend;
+  extra_cfg->enable_warp_newmv_delta = cfg->enable_warp_newmv_delta;
   extra_cfg->enable_intra_dip = cfg->enable_intra_dip;
   extra_cfg->enable_smooth_intra = cfg->enable_smooth_intra;
   extra_cfg->enable_paeth_intra = cfg->enable_paeth_intra;
@@ -1650,6 +1654,8 @@ static avm_codec_err_t set_encoder_config(AV2EncoderConfig *oxcf,
   oxcf->motion_mode_cfg.seq_enabled_motion_modes = seq_enabled_motion_modes;
   oxcf->motion_mode_cfg.enable_six_param_warp_delta =
       enable_six_param_warp_delta;
+  oxcf->motion_mode_cfg.enable_warp_newmv_delta =
+      extra_cfg->enable_warp_newmv_delta;
 
   // Set partition related configuration.
   part_cfg->disable_ml_partition_speed_features =
@@ -4399,6 +4405,11 @@ static avm_codec_err_t encoder_set_option(avm_codec_alg_priv_t *ctx,
                                   &g_av2_codec_arg_defs.enable_warp_extend,
                                   argv, err_string)) {
     extra_cfg.enable_warp_extend = avm_arg_parse_int_helper(&arg, err_string);
+  } else if (avm_arg_match_helper(
+                 &arg, &g_av2_codec_arg_defs.enable_warp_newmv_delta, argv,
+                 err_string)) {
+    extra_cfg.enable_warp_newmv_delta =
+        avm_arg_parse_int_helper(&arg, err_string);
   } else if (avm_arg_match_helper(&arg, &g_av2_codec_arg_defs.enable_intra_dip,
                                   argv, err_string)) {
     extra_cfg.enable_intra_dip = avm_arg_parse_int_helper(&arg, err_string);
@@ -4865,7 +4876,7 @@ static const avm_codec_enc_cfg_t encoder_usage_cfg[] = {
           1,    1, 1, 1,
           0,    1, 1, 1,
           1,    1, 1, 1,
-          1,    1, 1, 1,
+          1,    1, 1, 1, 1,
           0,    0, 1, 1,
           1,    1, 1, 1,
           1,    1, 1,
@@ -5001,7 +5012,7 @@ static const avm_codec_enc_cfg_t encoder_usage_cfg[] = {
           1,    1, 1, 1,
           0,    1, 1, 1,
           1,    1, 1, 1,
-          1,    1, 1, 1,
+          1,    1, 1, 1, 1,
           0,    0, 1, 1,
           1,    1, 1, 1,
           1,    1, 1,
