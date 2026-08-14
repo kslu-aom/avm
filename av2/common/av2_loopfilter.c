@@ -25,6 +25,10 @@
 #include "av2/common/seg_common.h"
 
 #define MAX_SIDE_TABLE 296
+
+// Set to 1 to activate the root-cause deblocking fix that prevents sub-PU edge
+// checks from corrupting the transform size of true TU boundaries.
+#define FIX_SUB_PU_LPF_CORRUPTION 0
 // based on int side_threshold = (int)(32 * AVMMAX(0.0444 * q_ind - 2.9936, 0.31
 // * q_ind - 39) );
 static const int16_t side_thresholds[MAX_SIDE_TABLE] = {
@@ -585,6 +589,9 @@ static TX_SIZE set_lpf_parameters(
   TX_SIZE ts =
       get_transform_size(xd, mi[0], edge_dir, mi_row, mi_col, plane, tree_type,
                          plane_ptr, &tu_edge, &tx_info, &tx_m_partition_size);
+#if FIX_SUB_PU_LPF_CORRUPTION
+  const TX_SIZE ts_tu = ts;
+#endif
   const BLOCK_SIZE superblock_size = get_plane_block_size(
       cm->sb_size, plane_ptr->subsampling_x, plane_ptr->subsampling_y);
   assert(superblock_size < BLOCK_SIZES_ALL);
@@ -644,6 +651,9 @@ static TX_SIZE set_lpf_parameters(
           TX_SIZE pv_ts = get_transform_size(
               xd, mi_prev, edge_dir, pv_row, pv_col, plane, prev_tree_type,
               plane_ptr, &prev_tu_edge, &prev_tx_info, &pv_tx_m_partition_size);
+#if FIX_SUB_PU_LPF_CORRUPTION
+          const TX_SIZE pv_ts_tu = pv_ts;
+#endif
 
           mi_size_prev = get_remaining_mi_size(mi_prev, &prev_tx_info, edge_dir,
                                                x, y, plane, prev_tree_type,
@@ -683,7 +693,13 @@ static TX_SIZE set_lpf_parameters(
 
           if (((curr_q && curr_side) || (pv_q && pv_side)) &&
               (!curr_skipped || sub_pu_edge || pu_edge)) {
+#if FIX_SUB_PU_LPF_CORRUPTION
+            const TX_SIZE ts_for_filter = tu_edge ? ts_tu : ts;
+            const TX_SIZE pv_ts_for_filter = prev_tu_edge ? pv_ts_tu : pv_ts;
+            TX_SIZE clipped_ts = ts_for_filter;
+#else
             TX_SIZE clipped_ts = ts;
+#endif
             if (!plane) {
               if (((VERT_EDGE == edge_dir) && (width < x + 16)) ||
                   ((HORZ_EDGE == edge_dir) && (height < y + 16))) {
@@ -697,7 +713,12 @@ static TX_SIZE set_lpf_parameters(
                 clipped_ts = AVMMIN(clipped_ts, TX_8X8);
               }
             }
+#if FIX_SUB_PU_LPF_CORRUPTION
+            const TX_SIZE min_ts = AVMMIN(clipped_ts, pv_ts_for_filter);
+#else
             const TX_SIZE min_ts = AVMMIN(clipped_ts, pv_ts);
+#endif
+
             if (TX_4X4 >= min_ts) {
               params->filter_length_neg = 4;
               params->filter_length_pos = 4;

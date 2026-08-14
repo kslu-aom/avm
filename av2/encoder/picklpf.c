@@ -491,23 +491,35 @@ void av2_pick_filter_level(const YV12_BUFFER_CONFIG *sd, AV2_COMP *cpi,
       (cm->current_frame.frame_type == INTER_FRAME || frame_is_sframe(cm));
 
   if (rdo_search_lf_sub_pu) {
-    struct loopfilter lf_off;
-    struct loopfilter lf_on;
-    memset(&lf_off, 0, sizeof(lf_off));
-    memset(&lf_on, 0, sizeof(lf_on));
+    const GF_GROUP *const gf_group = &cpi->gf_group;
+    const int update_type = gf_group->update_type[gf_group->index];
+    const bool is_ref_frame =
+        frame_is_kf_gf_arf(cpi) || (update_type == INTNL_ARF_UPDATE) ||
+        (cm->current_frame.pyramid_level < 3);
 
-    cm->features.allow_lf_sub_pu = 0;
-    double cost_off = pick_filter_level_helper(sd, cpi, method, &lf_off);
-
-    cm->features.allow_lf_sub_pu = 1;
-    double cost_on = pick_filter_level_helper(sd, cpi, method, &lf_on);
-
-    if (cost_on < cost_off) {
-      cm->features.allow_lf_sub_pu = 1;
-      cm->lf = lf_on;
-    } else {
+    if (is_ref_frame) {
+      // Approach B: Protect reference pictures from sub-PU deblocking degradation
       cm->features.allow_lf_sub_pu = 0;
-      cm->lf = lf_off;
+      pick_filter_level_helper(sd, cpi, method, &cm->lf);
+    } else {
+      struct loopfilter lf_off;
+      struct loopfilter lf_on;
+      memset(&lf_off, 0, sizeof(lf_off));
+      memset(&lf_on, 0, sizeof(lf_on));
+
+      cm->features.allow_lf_sub_pu = 0;
+      double cost_off = pick_filter_level_helper(sd, cpi, method, &lf_off);
+
+      cm->features.allow_lf_sub_pu = 1;
+      double cost_on = pick_filter_level_helper(sd, cpi, method, &lf_on);
+
+      if (cost_on < cost_off) {
+        cm->features.allow_lf_sub_pu = 1;
+        cm->lf = lf_on;
+      } else {
+        cm->features.allow_lf_sub_pu = 0;
+        cm->lf = lf_off;
+      }
     }
   } else {
     pick_filter_level_helper(sd, cpi, method, &cm->lf);
