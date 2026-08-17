@@ -461,6 +461,19 @@ typedef struct cfg_options {
    *
    */
   unsigned int enable_warp_newmv_delta;
+  /*!\brief warp delta search method (0: step, 1: grad, 2: grad+refine, -1:
+   * default by speed)
+   *
+   */
+  int warp_delta_search_method;
+  /*!\brief warp delta gradient step scaling percentage (default: 100)
+   *
+   */
+  int warp_delta_grad_step_scale;
+  /*!\brief warp delta gradient refinement passes (default: 0)
+   *
+   */
+  int warp_delta_grad_refine_iters;
 
   /*!\brief enable global motion
    *

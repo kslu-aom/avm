@@ -184,6 +184,10 @@ struct av2_extracfg {
                                     // for sequence
   int enable_warp_extend;           // enable warp extension for sequence
   int enable_warp_newmv_delta;      // enable warp delta in WARP_NEWMV mode
+  int warp_delta_search_method;  // warp delta search method (0: step, 1: grad,
+                                 // 2: grad+refine, -1: auto)
+  int warp_delta_grad_step_scale;    // warp delta grad step scale percentage
+  int warp_delta_grad_refine_iters;  // warp delta grad refine iters
   int enable_intra_dip;     // enable intra DIP (data-driven intra) sequence
   int enable_smooth_intra;  // enable smooth intra modes for sequence
   int enable_paeth_intra;   // enable Paeth intra mode for sequence
@@ -512,6 +516,9 @@ static struct av2_extracfg default_extra_cfg = {
   1,    // enable_six_param_warp_delta at sequence level
   1,    // enable_warp_extend at sequence level
   1,    // enable_warp_newmv_delta
+  -1,   // warp_delta_search_method (-1: auto)
+  100,  // warp_delta_grad_step_scale (100%)
+  0,    // warp_delta_grad_refine_iters (0)
   1,    // enable_intra_dip at sequence level
   1,    // enable smooth intra modes usage for sequence
   1,    // enable Paeth intra mode usage for sequence
@@ -993,6 +1000,9 @@ static void update_encoder_config(cfg_options_t *cfg,
   cfg->enable_six_param_warp_delta = extra_cfg->enable_six_param_warp_delta;
   cfg->enable_warp_extend = extra_cfg->enable_warp_extend;
   cfg->enable_warp_newmv_delta = extra_cfg->enable_warp_newmv_delta;
+  cfg->warp_delta_search_method = extra_cfg->warp_delta_search_method;
+  cfg->warp_delta_grad_step_scale = extra_cfg->warp_delta_grad_step_scale;
+  cfg->warp_delta_grad_refine_iters = extra_cfg->warp_delta_grad_refine_iters;
   cfg->enable_intra_dip = extra_cfg->enable_intra_dip;
   cfg->enable_smooth_intra = extra_cfg->enable_smooth_intra;
   cfg->enable_paeth_intra = extra_cfg->enable_paeth_intra;
@@ -1114,6 +1124,9 @@ static void update_default_encoder_config(const cfg_options_t *cfg,
   extra_cfg->enable_six_param_warp_delta = cfg->enable_six_param_warp_delta;
   extra_cfg->enable_warp_extend = cfg->enable_warp_extend;
   extra_cfg->enable_warp_newmv_delta = cfg->enable_warp_newmv_delta;
+  extra_cfg->warp_delta_search_method = cfg->warp_delta_search_method;
+  extra_cfg->warp_delta_grad_step_scale = cfg->warp_delta_grad_step_scale;
+  extra_cfg->warp_delta_grad_refine_iters = cfg->warp_delta_grad_refine_iters;
   extra_cfg->enable_intra_dip = cfg->enable_intra_dip;
   extra_cfg->enable_smooth_intra = cfg->enable_smooth_intra;
   extra_cfg->enable_paeth_intra = cfg->enable_paeth_intra;
@@ -1656,6 +1669,12 @@ static avm_codec_err_t set_encoder_config(AV2EncoderConfig *oxcf,
       enable_six_param_warp_delta;
   oxcf->motion_mode_cfg.enable_warp_newmv_delta =
       extra_cfg->enable_warp_newmv_delta;
+  oxcf->motion_mode_cfg.warp_delta_search_method =
+      extra_cfg->warp_delta_search_method;
+  oxcf->motion_mode_cfg.warp_delta_grad_step_scale =
+      extra_cfg->warp_delta_grad_step_scale;
+  oxcf->motion_mode_cfg.warp_delta_grad_refine_iters =
+      extra_cfg->warp_delta_grad_refine_iters;
 
   // Set partition related configuration.
   part_cfg->disable_ml_partition_speed_features =
@@ -4410,6 +4429,21 @@ static avm_codec_err_t encoder_set_option(avm_codec_alg_priv_t *ctx,
                  err_string)) {
     extra_cfg.enable_warp_newmv_delta =
         avm_arg_parse_int_helper(&arg, err_string);
+  } else if (avm_arg_match_helper(
+                 &arg, &g_av2_codec_arg_defs.warp_delta_search_method, argv,
+                 err_string)) {
+    extra_cfg.warp_delta_search_method =
+        avm_arg_parse_int_helper(&arg, err_string);
+  } else if (avm_arg_match_helper(
+                 &arg, &g_av2_codec_arg_defs.warp_delta_grad_step_scale, argv,
+                 err_string)) {
+    extra_cfg.warp_delta_grad_step_scale =
+        avm_arg_parse_int_helper(&arg, err_string);
+  } else if (avm_arg_match_helper(
+                 &arg, &g_av2_codec_arg_defs.warp_delta_grad_refine_iters, argv,
+                 err_string)) {
+    extra_cfg.warp_delta_grad_refine_iters =
+        avm_arg_parse_int_helper(&arg, err_string);
   } else if (avm_arg_match_helper(&arg, &g_av2_codec_arg_defs.enable_intra_dip,
                                   argv, err_string)) {
     extra_cfg.enable_intra_dip = avm_arg_parse_int_helper(&arg, err_string);
@@ -4856,12 +4890,12 @@ static const avm_codec_enc_cfg_t encoder_usage_cfg[] = {
           1,    // enable_ext_partitions
           1,    // enable_tx_partition
           8,    // max_partition_aspect_ratio
-          0,    1, 1, /*extended sdp*/ 1,
+          0,    1,  1,   /*extended sdp*/ 1,
           1,
           1,  // enable RefineMv and OPFL for TIP
           1,  // MV traj
           0,  // enable_high_motion
-          1,    1, 1, 1,
+          1,    1,  1,   1,
           1,  // enable idtx intra for fsc is disabled case
           1,
           1,  // IST
@@ -4869,19 +4903,20 @@ static const avm_codec_enc_cfg_t encoder_usage_cfg[] = {
           0,  // chroma DCT only
           1,  // inter DDT
           1,  // enable_cctx
-          1,    1, 1,
+          1,    1,  1,
           3,  // select_cfl_ds
-          1,    1, 1, 1,
-          1,    1, 1, 0,
-          1,    1, 1, 1,
-          0,    1, 1, 1,
-          1,    1, 1, 1,
-          1,    1, 1, 1, 1,
-          0,    0, 1, 1,
-          1,    1, 1, 1,
-          1,    1, 1,
+          1,    1,  1,   1,
+          1,    1,  1,   0,
+          1,    1,  1,   1,
+          0,    1,  1,   1,
+          1,    1,  1,   1,
+          1,    1,  1,   1,
+          1,    -1, 100, 0,
+          0,    0,  1,   1,
+          1,    1,  1,   1,
+          1,    1,  1,
           0,  // reduced_tx_part_set
-          1,    1, 1, 1,
+          1,    1,  1,   1,
           3,    1,
           0,  // reduced_ref_frame_mvs_mode
           1,  // enable_reduced_reference_set
@@ -4892,7 +4927,7 @@ static const avm_codec_enc_cfg_t encoder_usage_cfg[] = {
           0,  // max_drl_refmvs
 
           0,  // max_drl_refbvs
-          1,    1, 1,
+          1,    1,  1,
           1,  // enable_avg_cdf
           1,  // avg_cdf_type
           1,
@@ -4906,7 +4941,7 @@ static const avm_codec_enc_cfg_t encoder_usage_cfg[] = {
           0,  // crop_win_right_offset
           0,  // crop_win_top_offset
           0,  // crop_win_bottom_offset
-          NULL, 0, 0,
+          NULL, 0,  0,
           0,  // enable_mfh_obu_signaling
           1,
           0,  // enable_low_complexity_decode
@@ -4992,12 +5027,12 @@ static const avm_codec_enc_cfg_t encoder_usage_cfg[] = {
           1,    // enable_ext_partitions
           1,    // enable_tx_partition
           8,    // max_partition_aspect_ratio
-          0,    1, 1, /*extended sdp*/ 1,
+          0,    1,  1,   /*extended sdp*/ 1,
           1,
           1,  // enable RefineMv and OPFL for TIP
           1,  // MV traj
           0,  // enable_high_motion
-          1,    1, 1, 1,
+          1,    1,  1,   1,
           1,  // enable idtx intra for fsc is disabled case
           1,
           1,  // IST
@@ -5005,19 +5040,20 @@ static const avm_codec_enc_cfg_t encoder_usage_cfg[] = {
           0,  // chroma DCT only
           1,  // inter DDT
           1,  // enable_cctx
-          1,    1, 1,
+          1,    1,  1,
           3,  // select_cfl_ds
-          1,    1, 1, 1,
-          1,    1, 1, 0,
-          1,    1, 1, 1,
-          0,    1, 1, 1,
-          1,    1, 1, 1,
-          1,    1, 1, 1, 1,
-          0,    0, 1, 1,
-          1,    1, 1, 1,
-          1,    1, 1,
+          1,    1,  1,   1,
+          1,    1,  1,   0,
+          1,    1,  1,   1,
+          0,    1,  1,   1,
+          1,    1,  1,   1,
+          1,    1,  1,   1,
+          1,    -1, 100, 0,
+          0,    0,  1,   1,
+          1,    1,  1,   1,
+          1,    1,  1,
           0,  // reduced_tx_part_set
-          1,    1, 1, 1,
+          1,    1,  1,   1,
           3,    1,
           0,  // reduced_ref_frame_mvs_mode
           1,  // enable_reduced_reference_set
@@ -5028,7 +5064,7 @@ static const avm_codec_enc_cfg_t encoder_usage_cfg[] = {
           0,  // max_drl_refmvs
 
           0,  // max_drl_refbvs
-          1,    1, 1,
+          1,    1,  1,
           1,  // enable_avg_cdf
           1,  // avg_cdf_type
           1,
@@ -5042,7 +5078,7 @@ static const avm_codec_enc_cfg_t encoder_usage_cfg[] = {
           0,  // crop_win_right_offset
           0,  // crop_win_top_offset
           0,  // crop_win_bottom_offset
-          NULL, 0, 0,
+          NULL, 0,  0,
           0,  // enable_mfh_obu_signaling
           1,
           0,  // enable_low_complexity_decode

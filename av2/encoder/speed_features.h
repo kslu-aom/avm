@@ -57,6 +57,14 @@ enum {
                       (1 << NEAR_NEARMV),
 };
 
+typedef enum {
+  WARP_DELTA_STEP_SEARCH = 0,  // Coordinate descent (plus/minus search)
+  WARP_DELTA_GRADIENT_SEARCH =
+      1,  // Fast gradient-based direct parameter estimation
+  WARP_DELTA_GRADIENT_PLUS_REFINE =
+      2,  // Gradient-based estimation + 1-pass local polish
+} WARP_DELTA_SEARCH_METHOD;
+
 /* This enumeration defines when the rate control recode loop will be
  * enabled.
  */
@@ -696,6 +704,19 @@ typedef struct INTER_MODE_SPEED_FEATURES {
 
   // Prune/disable WARP_DELTA search specifically in WARP_NEWMV mode.
   int prune_warp_delta_in_warp_newmv;
+
+  // Search method for WARP_DELTA parameters:
+  // 0 : Standard coordinate descent (plus/minus search)
+  // 1 : Fast gradient-based direct parameter estimation
+  // 2 : Gradient-based estimation + 1-pass local polish
+  WARP_DELTA_SEARCH_METHOD warp_delta_search_method;
+
+  // Scaling factor for gradient step size in percentage (default: 100).
+  int warp_delta_grad_step_scale;
+
+  // Number of local refinement passes around gradient estimate (0: direct only,
+  // 1: 1-pass polish).
+  int warp_delta_grad_refine_iters;
 
   // Skip extended compound mode when ref frame corresponding to NEWMV does not
   // have NEWMV as single mode winner.

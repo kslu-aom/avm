@@ -617,6 +617,9 @@ typedef struct {
   int seq_enabled_motion_modes;
   int enable_six_param_warp_delta;
   int enable_warp_newmv_delta;
+  int warp_delta_search_method;
+  int warp_delta_grad_step_scale;
+  int warp_delta_grad_refine_iters;
 } MotionModeCfg;
 
 typedef struct {

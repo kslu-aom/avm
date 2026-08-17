@@ -391,6 +391,9 @@ static void set_good_speed_features_framesize_independent(
     // Predictive single-ref NEWMV reuse across the DRL.
     sf->mv_sf.predict_repeated_newmv = 1;
     sf->inter_sf.enable_six_param_warp_in_winner_mode = 1;
+    sf->inter_sf.warp_delta_search_method = WARP_DELTA_GRADIENT_SEARCH;
+    sf->inter_sf.warp_delta_grad_step_scale = 100;
+    sf->inter_sf.warp_delta_grad_refine_iters = 0;
 
     // Cap the DRL depth for a fresh single-ref NEWMV search; reuse the
     // nearest searched result beyond the cap.
@@ -850,6 +853,9 @@ static AVM_INLINE void init_inter_sf(INTER_MODE_SPEED_FEATURES *inter_sf) {
   inter_sf->prune_interintra_by_ref_idx = 0;
   inter_sf->prune_warp_delta_by_ref_idx = 0;
   inter_sf->prune_warp_delta_in_warp_newmv = 0;
+  inter_sf->warp_delta_search_method = WARP_DELTA_STEP_SEARCH;
+  inter_sf->warp_delta_grad_step_scale = 100;
+  inter_sf->warp_delta_grad_refine_iters = 0;
   inter_sf->prune_comp_using_best_single_mode_ref = 0;
   inter_sf->prune_mode_search_simple_translation = 0;
   inter_sf->prune_comp_type_by_comp_avg = 0;
@@ -1201,6 +1207,34 @@ void av2_set_speed_features_framesize_independent(AV2_COMP *cpi, int speed) {
   const char *env_newmv_delta = getenv("ENABLE_WARP_NEWMV_DELTA");
   if (env_newmv_delta) {
     sf->inter_sf.prune_warp_delta_in_warp_newmv = !atoi(env_newmv_delta);
+  }
+
+  if (cpi->oxcf.motion_mode_cfg.warp_delta_search_method >= 0) {
+    sf->inter_sf.warp_delta_search_method =
+        (WARP_DELTA_SEARCH_METHOD)
+            cpi->oxcf.motion_mode_cfg.warp_delta_search_method;
+  }
+  if (cpi->oxcf.motion_mode_cfg.warp_delta_grad_step_scale > 0) {
+    sf->inter_sf.warp_delta_grad_step_scale =
+        cpi->oxcf.motion_mode_cfg.warp_delta_grad_step_scale;
+  }
+  if (cpi->oxcf.motion_mode_cfg.warp_delta_grad_refine_iters >= 0) {
+    sf->inter_sf.warp_delta_grad_refine_iters =
+        cpi->oxcf.motion_mode_cfg.warp_delta_grad_refine_iters;
+  }
+
+  const char *env_wd_search = getenv("WARP_DELTA_SEARCH_METHOD");
+  if (env_wd_search) {
+    sf->inter_sf.warp_delta_search_method =
+        (WARP_DELTA_SEARCH_METHOD)atoi(env_wd_search);
+  }
+  const char *env_wd_scale = getenv("WARP_DELTA_GRAD_SCALE");
+  if (env_wd_scale) {
+    sf->inter_sf.warp_delta_grad_step_scale = atoi(env_wd_scale);
+  }
+  const char *env_wd_refine = getenv("WARP_DELTA_GRAD_REFINE_ITERS");
+  if (env_wd_refine) {
+    sf->inter_sf.warp_delta_grad_refine_iters = atoi(env_wd_refine);
   }
 
   if (oxcf->mode == GOOD && cpi->oxcf.enable_low_complexity_decode) {

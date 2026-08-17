@@ -341,6 +341,9 @@ const arg_def_t *av2_key_val_args[] = {
   &g_av2_codec_arg_defs.enable_warped_motion,
   &g_av2_codec_arg_defs.enable_warp_extend,
   &g_av2_codec_arg_defs.enable_warp_newmv_delta,
+  &g_av2_codec_arg_defs.warp_delta_search_method,
+  &g_av2_codec_arg_defs.warp_delta_grad_step_scale,
+  &g_av2_codec_arg_defs.warp_delta_grad_refine_iters,
   &g_av2_codec_arg_defs.enable_wiener_nonsep,
   &g_av2_codec_arg_defs.erp_pruning_level,
   &g_av2_codec_arg_defs.explicit_ref_frame_map,
@@ -587,6 +590,9 @@ static void init_config(cfg_options_t *config) {
   config->enable_six_param_warp_delta = 1;
   config->enable_warp_extend = 1;
   config->enable_warp_newmv_delta = 1;
+  config->warp_delta_search_method = -1;
+  config->warp_delta_grad_step_scale = 100;
+  config->warp_delta_grad_refine_iters = 0;
   config->enable_global_motion = 1;
   config->enable_skip_mode = 1;
   config->enable_diff_wtd_comp = 1;
