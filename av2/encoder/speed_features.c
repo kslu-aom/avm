@@ -391,7 +391,7 @@ static void set_good_speed_features_framesize_independent(
     // Predictive single-ref NEWMV reuse across the DRL.
     sf->mv_sf.predict_repeated_newmv = 1;
     sf->inter_sf.enable_six_param_warp_in_winner_mode = 1;
-    sf->inter_sf.warp_delta_search_method = WARP_DELTA_GRADIENT_SEARCH;
+    sf->inter_sf.warp_delta_search_method = WARP_DELTA_GRADIENT_JOINT_2X2;
     sf->inter_sf.warp_delta_grad_step_scale = 100;
     sf->inter_sf.warp_delta_grad_refine_iters = 0;
 

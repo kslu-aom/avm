@@ -60,9 +60,13 @@ enum {
 typedef enum {
   WARP_DELTA_STEP_SEARCH = 0,  // Coordinate descent (plus/minus search)
   WARP_DELTA_GRADIENT_SEARCH =
-      1,  // Fast gradient-based direct parameter estimation
+      1,  // Fast 1x1 decoupled gradient direct parameter estimation
   WARP_DELTA_GRADIENT_PLUS_REFINE =
-      2,  // Gradient-based estimation + 1-pass local polish
+      2,  // 1x1 decoupled gradient estimation + 1-pass local polish
+  WARP_DELTA_GRADIENT_JOINT_2X2 =
+      3,  // 2x2 coupled joint solve + translational MV refine
+  WARP_DELTA_GRADIENT_JOINT_2X2_PLUS_REFINE =
+      4,  // 2x2 coupled joint solve + 1-pass polish + translational MV refine
 } WARP_DELTA_SEARCH_METHOD;
 
 /* This enumeration defines when the rate control recode loop will be

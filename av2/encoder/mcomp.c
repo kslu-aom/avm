@@ -5442,6 +5442,501 @@ int av2_pick_warp_delta_gradient(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
   return 1;
 }
 
+// Estimates delta warp parameters by solving coupled 2x2 normal equations
+void av2_estimate_warp_delta_from_gradients_2x2(
+    const uint16_t *src, int src_stride, const uint16_t *pred, int pred_stride,
+    int bw, int bh, int six_param, int step_size, int max_coded_index,
+    int scale_percent, int delta_params[4]) {
+  const int center_x = bw / 2 - 1;
+  const int center_y = bh / 2 - 1;
+  const int S = 1 << WARPEDMODEL_PREC_BITS;
+
+  if (six_param) {
+    // Two independent 2x2 systems for 6-param AFFINE:
+    // [X00 X01] [dh2] = -S [bx0]
+    // [X01 X11] [dh3]      [bx1]
+    // and
+    // [Y00 Y01] [dh4] = -S [by0]
+    // [Y01 Y11] [dh5]      [by1]
+    int64_t X00 = 0, X01 = 0, X11 = 0;
+    int64_t Y00 = 0, Y01 = 0, Y11 = 0;
+    int64_t bx0 = 0, bx1 = 0, by0 = 0, by1 = 0;
+
+    for (int j = 0; j < bh; j++) {
+      const int dy = j - center_y;
+      const int j_prev = AVMMAX(0, j - 1);
+      const int j_next = AVMMIN(bh - 1, j + 1);
+      const uint16_t *pred_row = &pred[j * pred_stride];
+      const uint16_t *pred_row_prev = &pred[j_prev * pred_stride];
+      const uint16_t *pred_row_next = &pred[j_next * pred_stride];
+      const uint16_t *src_row = &src[j * src_stride];
+
+      for (int i = 0; i < bw; i++) {
+        const int dx = i - center_x;
+        const int i_prev = AVMMAX(0, i - 1);
+        const int i_next = AVMMIN(bw - 1, i + 1);
+
+        const int gx = (i == 0 || i == bw - 1)
+                           ? (pred_row[i_next] - pred_row[i_prev])
+                           : ((pred_row[i + 1] - pred_row[i - 1]) >> 1);
+        const int gy = (j == 0 || j == bh - 1)
+                           ? (pred_row_next[i] - pred_row_prev[i])
+                           : ((pred_row_next[i] - pred_row_prev[i]) >> 1);
+        const int e = (int)pred_row[i] - (int)src_row[i];
+
+        const int64_t gxx = (int64_t)gx * dx;
+        const int64_t gxy = (int64_t)gx * dy;
+        const int64_t gyx = (int64_t)gy * dx;
+        const int64_t gyy = (int64_t)gy * dy;
+
+        X00 += gxx * gxx;
+        X01 += gxx * gxy;
+        X11 += gxy * gxy;
+        bx0 += (int64_t)e * gxx;
+        bx1 += (int64_t)e * gxy;
+
+        Y00 += gyx * gyx;
+        Y01 += gyx * gyy;
+        Y11 += gyy * gyy;
+        by0 += (int64_t)e * gyx;
+        by1 += (int64_t)e * gyy;
+      }
+    }
+
+    const int scale = AVMMAX(1, scale_percent);
+    const double detX = (double)X00 * (double)X11 - (double)X01 * (double)X01;
+    if (detX > 1e-4 && step_size > 0) {
+      double raw_dh2 =
+          -((double)X11 * (double)bx0 - (double)X01 * (double)bx1) * (double)S /
+          detX;
+      double raw_dh3 =
+          -((double)X00 * (double)bx1 - (double)X01 * (double)bx0) * (double)S /
+          detX;
+      raw_dh2 = raw_dh2 * (double)scale / 100.0;
+      raw_dh3 = raw_dh3 * (double)scale / 100.0;
+      int idx2 = clamp((int)round(raw_dh2 / (double)step_size),
+                       -max_coded_index, max_coded_index);
+      int idx3 = clamp((int)round(raw_dh3 / (double)step_size),
+                       -max_coded_index, max_coded_index);
+      delta_params[0] = idx2 * step_size;
+      delta_params[1] = idx3 * step_size;
+    } else {
+      delta_params[0] = 0;
+      delta_params[1] = 0;
+    }
+
+    const double detY = (double)Y00 * (double)Y11 - (double)Y01 * (double)Y01;
+    if (detY > 1e-4 && step_size > 0) {
+      double raw_dh4 =
+          -((double)Y11 * (double)by0 - (double)Y01 * (double)by1) * (double)S /
+          detY;
+      double raw_dh5 =
+          -((double)Y00 * (double)by1 - (double)Y01 * (double)by0) * (double)S /
+          detY;
+      raw_dh4 = raw_dh4 * (double)scale / 100.0;
+      raw_dh5 = raw_dh5 * (double)scale / 100.0;
+      int idx4 = clamp((int)round(raw_dh4 / (double)step_size),
+                       -max_coded_index, max_coded_index);
+      int idx5 = clamp((int)round(raw_dh5 / (double)step_size),
+                       -max_coded_index, max_coded_index);
+      delta_params[2] = idx4 * step_size;
+      delta_params[3] = idx5 * step_size;
+    } else {
+      delta_params[2] = 0;
+      delta_params[3] = 0;
+    }
+  } else {
+    // 4-parameter ROTZOOM:
+    // [A00 A01] [alpha] = -S [b0]
+    // [A01 A11] [theta]      [b1]
+    int64_t A00 = 0, A01 = 0, A11 = 0;
+    int64_t b0 = 0, b1 = 0;
+
+    for (int j = 0; j < bh; j++) {
+      const int dy = j - center_y;
+      const int j_prev = AVMMAX(0, j - 1);
+      const int j_next = AVMMIN(bh - 1, j + 1);
+      const uint16_t *pred_row = &pred[j * pred_stride];
+      const uint16_t *pred_row_prev = &pred[j_prev * pred_stride];
+      const uint16_t *pred_row_next = &pred[j_next * pred_stride];
+      const uint16_t *src_row = &src[j * src_stride];
+
+      for (int i = 0; i < bw; i++) {
+        const int dx = i - center_x;
+        const int i_prev = AVMMAX(0, i - 1);
+        const int i_next = AVMMIN(bw - 1, i + 1);
+
+        const int gx = (i == 0 || i == bw - 1)
+                           ? (pred_row[i_next] - pred_row[i_prev])
+                           : ((pred_row[i + 1] - pred_row[i - 1]) >> 1);
+        const int gy = (j == 0 || j == bh - 1)
+                           ? (pred_row_next[i] - pred_row_prev[i])
+                           : ((pred_row_next[i] - pred_row_prev[i]) >> 1);
+        const int e = (int)pred_row[i] - (int)src_row[i];
+
+        const int64_t Jalpha = (int64_t)gx * dx + (int64_t)gy * dy;
+        const int64_t Jtheta = (int64_t)gx * dy - (int64_t)gy * dx;
+
+        A00 += Jalpha * Jalpha;
+        A01 += Jalpha * Jtheta;
+        A11 += Jtheta * Jtheta;
+        b0 += (int64_t)e * Jalpha;
+        b1 += (int64_t)e * Jtheta;
+      }
+    }
+
+    const int scale = AVMMAX(1, scale_percent);
+    const double detA = (double)A00 * (double)A11 - (double)A01 * (double)A01;
+    if (detA > 1e-4 && step_size > 0) {
+      double raw_alpha =
+          -((double)A11 * (double)b0 - (double)A01 * (double)b1) * (double)S /
+          detA;
+      double raw_theta =
+          -((double)A00 * (double)b1 - (double)A01 * (double)b0) * (double)S /
+          detA;
+      raw_alpha = raw_alpha * (double)scale / 100.0;
+      raw_theta = raw_theta * (double)scale / 100.0;
+      int idx_alpha = clamp((int)round(raw_alpha / (double)step_size),
+                            -max_coded_index, max_coded_index);
+      int idx_theta = clamp((int)round(raw_theta / (double)step_size),
+                            -max_coded_index, max_coded_index);
+      delta_params[0] = idx_alpha * step_size;
+      delta_params[1] = idx_theta * step_size;
+      delta_params[2] = -delta_params[1];
+      delta_params[3] = delta_params[0];
+    } else {
+      delta_params[0] = 0;
+      delta_params[1] = 0;
+      delta_params[2] = 0;
+      delta_params[3] = 0;
+    }
+  }
+}
+
+int av2_pick_warp_delta_gradient_joint_2x2(
+    const struct AV2_COMP *cpi, MACROBLOCKD *xd, MB_MODE_INFO *mbmi,
+    const SUBPEL_MOTION_SEARCH_PARAMS *ms_params, const ModeCosts *mode_costs,
+    warp_mode_info_array *prev_best_models, WARP_CANDIDATE *warp_param_stack,
+    int eval_motion_mode) {
+  (void)eval_motion_mode;
+  const AV2_COMMON *const cm = &cpi->common;
+  WarpedMotionParams *params = &mbmi->wm_params[0];
+  const BLOCK_SIZE bsize = mbmi->sb_type[PLANE_TYPE_Y];
+  const int bw = block_size_wide[bsize];
+  const int bh = block_size_high[bsize];
+  const int mi_row = xd->mi_row;
+  const int mi_col = xd->mi_col;
+
+  const struct scale_factors *sf =
+      get_ref_scale_factors_const(cm, mbmi->ref_frame[0]);
+
+  int enable_fast_model_search = prev_best_models && mbmi->warp_precision_idx;
+  bool can_refine_mv = (mbmi->mode == WARP_NEWMV);
+  const SubpelMvLimits *mv_limits = &ms_params->mv_limits;
+
+  WarpedMotionParams base_params;
+  int_mv center_mv;
+  av2_get_warp_base_params(cm, mbmi, &base_params, &center_mv,
+                           warp_param_stack);
+
+  MV *best_mv = &mbmi->mv[0].as_mv;
+  WarpedMotionParams best_wm_params;
+  int rate, sse;
+  uint64_t best_rd;
+  int valid;
+
+  int step_size = 0;
+  int max_coded_index = 0;
+  get_warp_model_steps(mbmi, &step_size, &max_coded_index);
+  const int max_warp_delta_value = step_size * max_coded_index;
+  WarpedMotionParams start_params = base_params;
+
+  int num_neighbors = 8;
+  int num_mv_iterations = 1;
+  int skip_mv_search = 0;
+
+  if (enable_fast_model_search) {
+    warp_mode_info cand_best_model;
+    if (get_valid_model_from_warp_stats_buffer(prev_best_models, mbmi,
+                                               &cand_best_model)) {
+      if (cand_best_model.is_valid) {
+        WarpedMotionParams prev_wm_params = cand_best_model.prev_wm_params;
+        for (int param_index = 2;
+             param_index < (mbmi->six_param_warp_model_flag ? 6 : 4);
+             param_index++) {
+          int actual_delta = prev_wm_params.wmmat[param_index] -
+                             base_params.wmmat[param_index];
+          int round_offset = step_size >> 1;
+          int truncated_delta =
+              ((abs(actual_delta) + round_offset) / step_size) * step_size;
+          if (truncated_delta > max_warp_delta_value)
+            truncated_delta = max_warp_delta_value;
+          truncated_delta =
+              actual_delta < 0 ? -truncated_delta : truncated_delta;
+          prev_wm_params.wmmat[param_index] =
+              truncated_delta + base_params.wmmat[param_index];
+        }
+        if (!mbmi->six_param_warp_model_flag) {
+          prev_wm_params.wmmat[4] = -prev_wm_params.wmmat[3];
+          prev_wm_params.wmmat[5] = prev_wm_params.wmmat[2];
+        }
+        start_params = prev_wm_params;
+        if (can_refine_mv && mbmi->warp_precision_idx) {
+          int_mv first_pass_start_mv = cand_best_model.mbmi_stats.mv[0];
+          if (mbmi->pb_mv_precision < MV_PRECISION_HALF_PEL)
+            lower_mv_precision(&first_pass_start_mv.as_mv,
+                               mbmi->pb_mv_precision);
+          if (av2_is_subpelmv_in_range(mv_limits, first_pass_start_mv.as_mv)) {
+            mbmi->mv[0] = first_pass_start_mv;
+            best_mv->row = first_pass_start_mv.as_mv.row;
+            best_mv->col = first_pass_start_mv.as_mv.col;
+            center_mv = first_pass_start_mv;
+            skip_mv_search = 1;
+          }
+        }
+      }
+    }
+  }
+
+  // Set up initial model from start_params
+  params->wmtype = mbmi->six_param_warp_model_flag ? AFFINE : ROTZOOM;
+  params->wmmat[2] = start_params.wmmat[2];
+  params->wmmat[3] = start_params.wmmat[3];
+  if (mbmi->six_param_warp_model_flag) {
+    params->wmmat[4] = start_params.wmmat[4];
+    params->wmmat[5] = start_params.wmmat[5];
+  } else {
+    params->wmmat[4] = -params->wmmat[3];
+    params->wmmat[5] = params->wmmat[2];
+  }
+  av2_reduce_warp_model(params);
+  av2_get_shear_params(params, sf);
+  params->invalid = 0;
+
+  const int warp_precision_idx_rate =
+      mode_costs
+          ->warp_precision_idx_cost[mbmi->sb_type[xd->tree_type == CHROMA_PART]]
+                                   [mbmi->warp_precision_idx];
+  const int error_per_bit = ms_params->mv_cost_params.mv_costs->errorperbit;
+
+  av2_set_warp_translation(mi_row, mi_col, bsize, center_mv.as_mv, params);
+
+  // Compute initial base prediction and initial RD
+  best_wm_params = *params;
+  rate = warp_precision_idx_rate +
+         av2_cost_model_param(mbmi, mode_costs, step_size, max_coded_index,
+                              &base_params);
+  sse = compute_motion_cost(xd, cm, ms_params, bsize, best_mv, can_refine_mv);
+  best_rd = sse + (int)ROUND_POWER_OF_TWO_64((int64_t)rate * error_per_bit,
+                                             RDDIV_BITS + AV2_PROB_COST_SHIFT -
+                                                 RD_EPB_SHIFT +
+                                                 PIXEL_TRANSFORM_ERROR_SCALE);
+
+#if WARP_DELTA_PRINT_STATS
+  const uint64_t initial_rd = best_rd;
+  int actual_iters = 0;
+#endif
+
+  // Predict delta parameters using 2x2 coupled image gradients
+  const uint16_t *src = ms_params->var_params.ms_buffers.src->buf;
+  const int src_stride = ms_params->var_params.ms_buffers.src->stride;
+  const uint16_t *pred = xd->plane[0].dst.buf;
+  const int pred_stride = xd->plane[0].dst.stride;
+
+  int estimated_deltas[4] = { 0 };
+  const int scale_percent = cpi->sf.inter_sf.warp_delta_grad_step_scale > 0
+                                ? cpi->sf.inter_sf.warp_delta_grad_step_scale
+                                : 100;
+  av2_estimate_warp_delta_from_gradients_2x2(
+      src, src_stride, pred, pred_stride, bw, bh,
+      mbmi->six_param_warp_model_flag, step_size, max_coded_index,
+      scale_percent, estimated_deltas);
+
+  int has_nonzero_delta = 0;
+  for (int k = 0; k < 4; k++) {
+    if (estimated_deltas[k] != 0) has_nonzero_delta = 1;
+  }
+
+  if (has_nonzero_delta) {
+#if WARP_DELTA_PRINT_STATS
+    actual_iters = 1;
+#endif
+    *params = base_params;
+    params->wmtype = mbmi->six_param_warp_model_flag ? AFFINE : ROTZOOM;
+    params->wmmat[2] += estimated_deltas[0];
+    params->wmmat[3] += estimated_deltas[1];
+    if (mbmi->six_param_warp_model_flag) {
+      params->wmmat[4] += estimated_deltas[2];
+      params->wmmat[5] += estimated_deltas[3];
+    } else {
+      params->wmmat[4] = -params->wmmat[3];
+      params->wmmat[5] = params->wmmat[2];
+    }
+
+    valid = av2_is_warp_model_reduced(params);
+    av2_get_shear_params(params, sf);
+    if (valid) {
+      av2_set_warp_translation(mi_row, mi_col, bsize, center_mv.as_mv, params);
+      rate = warp_precision_idx_rate +
+             av2_cost_model_param(mbmi, mode_costs, step_size, max_coded_index,
+                                  &base_params);
+      sse =
+          compute_motion_cost(xd, cm, ms_params, bsize, best_mv, can_refine_mv);
+      const uint64_t cand_rd =
+          sse + (int)ROUND_POWER_OF_TWO_64((int64_t)rate * error_per_bit,
+                                           RDDIV_BITS + AV2_PROB_COST_SHIFT -
+                                               RD_EPB_SHIFT +
+                                               PIXEL_TRANSFORM_ERROR_SCALE);
+
+      if (cand_rd < best_rd) {
+        best_wm_params = *params;
+        best_rd = cand_rd;
+      }
+    }
+  }
+
+  // Refine translational subpel MV for WARP_NEWMV if delta was evaluated
+  if (can_refine_mv && !skip_mv_search) {
+    *params = best_wm_params;
+    refine_translational_mv(cm, xd, ms_params, mbmi, params, &base_params,
+                            &best_wm_params, best_mv, warp_precision_idx_rate,
+                            mode_costs, step_size, max_coded_index,
+                            num_neighbors, num_mv_iterations, &best_rd);
+    center_mv.as_mv = *best_mv;
+  }
+
+  // Optional local refinement around the candidate
+  const int refine_iters = cpi->sf.inter_sf.warp_delta_grad_refine_iters;
+  if (refine_iters > 0 || cpi->sf.inter_sf.warp_delta_search_method ==
+                              WARP_DELTA_GRADIENT_JOINT_2X2_PLUS_REFINE) {
+    const int iters_to_run = refine_iters > 0 ? refine_iters : 1;
+    for (int iter = 0; iter < iters_to_run; iter++) {
+#if WARP_DELTA_PRINT_STATS
+      actual_iters++;
+#endif
+      int center_best = 1;
+      for (int param_index = 2;
+           param_index < (mbmi->six_param_warp_model_flag ? 6 : 4);
+           param_index++) {
+        const WarpedMotionParams center_params = best_wm_params;
+        const int dirs[2] = { 1, -1 };
+        for (int d = 0; d < 2; d++) {
+          const int dir = dirs[d];
+          *params = center_params;
+          params->wmmat[param_index] += dir * step_size;
+          int delta =
+              params->wmmat[param_index] - base_params.wmmat[param_index];
+          if (abs(delta) > max_warp_delta_value) continue;
+
+          if (!mbmi->six_param_warp_model_flag) {
+            params->wmmat[4] = -params->wmmat[3];
+            params->wmmat[5] = params->wmmat[2];
+          }
+          valid = av2_is_warp_model_reduced(params);
+          av2_get_shear_params(params, sf);
+          if (!valid) continue;
+
+          av2_set_warp_translation(mi_row, mi_col, bsize, center_mv.as_mv,
+                                   params);
+          rate = warp_precision_idx_rate +
+                 av2_cost_model_param(mbmi, mode_costs, step_size,
+                                      max_coded_index, &base_params);
+          sse = compute_motion_cost(xd, cm, ms_params, bsize, best_mv,
+                                    can_refine_mv);
+          const uint64_t cand_rd =
+              sse + (int)ROUND_POWER_OF_TWO_64(
+                        (int64_t)rate * error_per_bit,
+                        RDDIV_BITS + AV2_PROB_COST_SHIFT - RD_EPB_SHIFT +
+                            PIXEL_TRANSFORM_ERROR_SCALE);
+
+          if (cand_rd < best_rd) {
+            best_wm_params = *params;
+            best_rd = cand_rd;
+            center_best = 0;
+          }
+        }
+      }
+      if (center_best) break;
+
+      if (can_refine_mv && !skip_mv_search) {
+        *params = best_wm_params;
+        refine_translational_mv(
+            cm, xd, ms_params, mbmi, params, &base_params, &best_wm_params,
+            best_mv, warp_precision_idx_rate, mode_costs, step_size,
+            max_coded_index, num_neighbors, num_mv_iterations, &best_rd);
+        center_mv.as_mv = *best_mv;
+      }
+    }
+  }
+
+  if (prev_best_models) {
+    warp_mode_info this_warp_stats;
+    this_warp_stats.is_valid = 1;
+    this_warp_stats.step_size = step_size;
+    this_warp_stats.prev_wm_params = best_wm_params;
+    this_warp_stats.mbmi_stats = *mbmi;
+    update_warp_stats_buffer(&this_warp_stats, prev_best_models);
+  }
+
+  mbmi->wm_params[0] = best_wm_params;
+
+#if WARP_DELTA_PRINT_STATS
+  const int search_space_dim = mbmi->six_param_warp_model_flag ? 4 : 2;
+  const int d2 =
+      step_size ? (best_wm_params.wmmat[2] - base_params.wmmat[2]) / step_size
+                : 0;
+  const int d3 =
+      step_size ? (best_wm_params.wmmat[3] - base_params.wmmat[3]) / step_size
+                : 0;
+  const int d4 =
+      step_size ? (best_wm_params.wmmat[4] - base_params.wmmat[4]) / step_size
+                : 0;
+  const int d5 =
+      step_size ? (best_wm_params.wmmat[5] - base_params.wmmat[5]) / step_size
+                : 0;
+
+  static int warp_delta_print_counter = 0;
+  static int warp_delta_sparsity = -1;
+  if (warp_delta_sparsity < 0) {
+    const char *env_sparsity = getenv("WARP_DELTA_PRINT_SPARSITY");
+    if (!env_sparsity) env_sparsity = getenv("WARP_DELTA_SPARSITY");
+    if (env_sparsity) {
+      warp_delta_sparsity = atoi(env_sparsity);
+    } else {
+      warp_delta_sparsity = WARP_DELTA_PRINT_SPARSITY_DEFAULT;
+    }
+  }
+
+  if (warp_delta_sparsity > 0 &&
+      (warp_delta_print_counter++ % warp_delta_sparsity) == 0) {
+    fprintf(
+        stderr,
+        "[WARP_DELTA_SEARCH] method=GRAD2X2 mode=%d (%s) ref0=%d "
+        "warp_ref_idx=%d "
+        "prec_idx=%d six_param=%d dim=%d bsize=%dx%d fast_search=%d "
+        "step=%d max_coded_idx=%d cfg_iters=1 actual_iters=%d "
+        "init_rd=%llu best_rd=%llu rd_gain=%" PRId64
+        " "
+        "coded_deltas=[%d, %d, %d, %d] best_wmmat=[%d, %d, %d, %d] "
+        "base_wmmat=[%d, %d, %d, %d]\n",
+        mbmi->mode,
+        mbmi->mode == WARP_NEWMV ? "WARP_NEWMV"
+                                 : (mbmi->mode == WARPMV ? "WARPMV" : "OTHER"),
+        mbmi->ref_frame[0], mbmi->warp_ref_idx, mbmi->warp_precision_idx,
+        mbmi->six_param_warp_model_flag, search_space_dim,
+        block_size_wide[bsize], block_size_high[bsize],
+        enable_fast_model_search, step_size, max_coded_index, actual_iters,
+        (unsigned long long)initial_rd, (unsigned long long)best_rd,
+        (int64_t)initial_rd - (int64_t)best_rd, d2, d3, d4, d5,
+        best_wm_params.wmmat[2], best_wm_params.wmmat[3],
+        best_wm_params.wmmat[4], best_wm_params.wmmat[5], base_params.wmmat[2],
+        base_params.wmmat[3], base_params.wmmat[4], base_params.wmmat[5]);
+  }
+#endif
+
+  return 1;
+}
+
 // Returns 1 if able to select a good model, 0 if not
 // TODO(rachelbarker):
 // This function cannot use the same neighbor pruning used in the other warp
@@ -5455,6 +5950,12 @@ int av2_pick_warp_delta(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
                         warp_mode_info_array *prev_best_models,
                         WARP_CANDIDATE *warp_param_stack,
                         int eval_motion_mode) {
+  if (cpi->sf.inter_sf.warp_delta_search_method >=
+      WARP_DELTA_GRADIENT_JOINT_2X2) {
+    return av2_pick_warp_delta_gradient_joint_2x2(
+        cpi, xd, mbmi, ms_params, mode_costs, prev_best_models,
+        warp_param_stack, eval_motion_mode);
+  }
   if (cpi->sf.inter_sf.warp_delta_search_method >= WARP_DELTA_GRADIENT_SEARCH) {
     return av2_pick_warp_delta_gradient(cpi, xd, mbmi, ms_params, mode_costs,
                                         prev_best_models, warp_param_stack,
