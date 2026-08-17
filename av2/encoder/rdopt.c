@@ -2642,11 +2642,38 @@ static AVM_INLINE int handle_warp_delta_mode(
     const bool use_six_param_in_winner =
         (eval_motion_mode == six_param_enabled_by_tid);
     if (use_six_param_in_winner ||
-        !cpi->sf.inter_sf.enable_six_param_warp_in_winner_mode)
+        !cpi->sf.inter_sf.enable_six_param_warp_in_winner_mode) {
+      if (cpi->sf.inter_sf.prune_warp_delta_precision_search &&
+          mbmi->warp_precision_idx > 0 && prev_best_models) {
+        warp_mode_info cand_best_model;
+        if (get_valid_model_from_warp_stats_buffer(prev_best_models, mbmi,
+                                                   &cand_best_model)) {
+          if (cand_best_model.is_valid) {
+            WarpedMotionParams base_params;
+            int_mv center_mv;
+            av2_get_warp_base_params(
+                cm, mbmi, &base_params, &center_mv,
+                mbmi_ext
+                    ->warp_param_stack[av2_ref_frame_type(mbmi->ref_frame)]);
+            int is_zero_delta = (cand_best_model.prev_wm_params.wmmat[2] ==
+                                 base_params.wmmat[2]) &&
+                                (cand_best_model.prev_wm_params.wmmat[3] ==
+                                 base_params.wmmat[3]);
+            if (mbmi->six_param_warp_model_flag) {
+              is_zero_delta &= (cand_best_model.prev_wm_params.wmmat[4] ==
+                                base_params.wmmat[4]) &&
+                               (cand_best_model.prev_wm_params.wmmat[5] ==
+                                base_params.wmmat[5]);
+            }
+            if (is_zero_delta) return -1;
+          }
+        }
+      }
       valid = av2_pick_warp_delta(
           cpi, xd, mbmi, &ms_params, &x->mode_costs, prev_best_models,
           mbmi_ext->warp_param_stack[av2_ref_frame_type(mbmi->ref_frame)],
           eval_motion_mode);
+    }
   }
 
   if (!valid) return -1;

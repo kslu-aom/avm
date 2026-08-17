@@ -722,6 +722,9 @@ typedef struct INTER_MODE_SPEED_FEATURES {
   // 1: 1-pass polish).
   int warp_delta_grad_refine_iters;
 
+  // Prune warp delta search at precision 1 if precision 0 chose zero delta.
+  int prune_warp_delta_precision_search;
+
   // Skip extended compound mode when ref frame corresponding to NEWMV does not
   // have NEWMV as single mode winner.
   // 0 : no pruning

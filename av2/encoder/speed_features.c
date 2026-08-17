@@ -394,6 +394,7 @@ static void set_good_speed_features_framesize_independent(
     sf->inter_sf.warp_delta_search_method = WARP_DELTA_GRADIENT_JOINT_2X2;
     sf->inter_sf.warp_delta_grad_step_scale = 100;
     sf->inter_sf.warp_delta_grad_refine_iters = 0;
+    sf->inter_sf.prune_warp_delta_precision_search = 1;
 
     // Cap the DRL depth for a fresh single-ref NEWMV search; reuse the
     // nearest searched result beyond the cap.
@@ -856,6 +857,7 @@ static AVM_INLINE void init_inter_sf(INTER_MODE_SPEED_FEATURES *inter_sf) {
   inter_sf->warp_delta_search_method = WARP_DELTA_STEP_SEARCH;
   inter_sf->warp_delta_grad_step_scale = 100;
   inter_sf->warp_delta_grad_refine_iters = 0;
+  inter_sf->prune_warp_delta_precision_search = 0;
   inter_sf->prune_comp_using_best_single_mode_ref = 0;
   inter_sf->prune_mode_search_simple_translation = 0;
   inter_sf->prune_comp_type_by_comp_avg = 0;
@@ -1235,6 +1237,10 @@ void av2_set_speed_features_framesize_independent(AV2_COMP *cpi, int speed) {
   const char *env_wd_refine = getenv("WARP_DELTA_GRAD_REFINE_ITERS");
   if (env_wd_refine) {
     sf->inter_sf.warp_delta_grad_refine_iters = atoi(env_wd_refine);
+  }
+  const char *env_wd_prune_prec = getenv("WARP_DELTA_PRUNE_PRECISION");
+  if (env_wd_prune_prec) {
+    sf->inter_sf.prune_warp_delta_precision_search = atoi(env_wd_prune_prec);
   }
 
   if (oxcf->mode == GOOD && cpi->oxcf.enable_low_complexity_decode) {

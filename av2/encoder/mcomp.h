@@ -578,7 +578,11 @@ int av2_pick_warp_delta(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
                         warp_mode_info_array *prev_best_models,
                         WARP_CANDIDATE *warp_param_stack, int eval_motion_mode);
 
-void av2_estimate_warp_delta_from_gradients(
+int get_valid_model_from_warp_stats_buffer(
+    warp_mode_info_array *prev_best_models, MB_MODE_INFO *mbmi,
+    warp_mode_info *cand_best_model);
+
+int64_t av2_estimate_warp_delta_from_gradients(
     const uint16_t *src, int src_stride, const uint16_t *pred, int pred_stride,
     int bw, int bh, int six_param, int step_size, int max_coded_index,
     int scale_percent, int delta_params[4]);
@@ -591,7 +595,7 @@ int av2_pick_warp_delta_gradient(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
                                  WARP_CANDIDATE *warp_param_stack,
                                  int eval_motion_mode);
 
-void av2_estimate_warp_delta_from_gradients_2x2(
+int64_t av2_estimate_warp_delta_from_gradients_2x2(
     const uint16_t *src, int src_stride, const uint16_t *pred, int pred_stride,
     int bw, int bh, int six_param, int step_size, int max_coded_index,
     int scale_percent, int delta_params[4]);

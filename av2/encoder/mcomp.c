@@ -5027,7 +5027,7 @@ void update_warp_stats_buffer(const warp_mode_info *const this_warp_stats,
 // At the beginning of the search, encoder check if there is any valid model
 // found in the buffer. If the valid model is found return 1; otherwise return
 // 0. If the valid model is found, this function output the cand_best_model.
-static int get_valid_model_from_warp_stats_buffer(
+int get_valid_model_from_warp_stats_buffer(
     warp_mode_info_array *prev_best_models, MB_MODE_INFO *mbmi,
     warp_mode_info *cand_best_model) {
   if (!prev_best_models) return 0;
@@ -5061,7 +5061,7 @@ static int get_valid_model_from_warp_stats_buffer(
 
 // Estimates delta warp parameters directly from image gradients and prediction
 // error
-void av2_estimate_warp_delta_from_gradients(
+int64_t av2_estimate_warp_delta_from_gradients(
     const uint16_t *src, int src_stride, const uint16_t *pred, int pred_stride,
     int bw, int bh, int six_param, int step_size, int max_coded_index,
     int scale_percent, int delta_params[4]) {
@@ -5071,6 +5071,7 @@ void av2_estimate_warp_delta_from_gradients(
 
   int64_t num[4] = { 0 };
   int64_t den[4] = { 0 };
+  int64_t sse_base = 0;
 
   for (int j = 0; j < bh; j++) {
     const int dy = j - center_y;
@@ -5094,6 +5095,7 @@ void av2_estimate_warp_delta_from_gradients(
                          ? (pred_row_next[i] - pred_row_prev[i])
                          : ((pred_row_next[i] - pred_row_prev[i]) >> 1);
       const int e = (int)pred_row[i] - (int)src_row[i];
+      sse_base += (int64_t)e * e;
 
       if (six_param) {
         const int64_t J2 = (int64_t)gx * dx;
@@ -5139,6 +5141,8 @@ void av2_estimate_warp_delta_from_gradients(
     delta_params[2] = -delta_params[1];
     delta_params[3] = delta_params[0];
   }
+
+  return sse_base;
 }
 
 int av2_pick_warp_delta_gradient(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
@@ -5246,22 +5250,6 @@ int av2_pick_warp_delta_gradient(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
 
   av2_set_warp_translation(mi_row, mi_col, bsize, center_mv.as_mv, params);
 
-  // Compute initial base prediction and initial RD
-  best_wm_params = *params;
-  rate = warp_precision_idx_rate +
-         av2_cost_model_param(mbmi, mode_costs, step_size, max_coded_index,
-                              &base_params);
-  sse = compute_motion_cost(xd, cm, ms_params, bsize, best_mv, can_refine_mv);
-  best_rd = sse + (int)ROUND_POWER_OF_TWO_64((int64_t)rate * error_per_bit,
-                                             RDDIV_BITS + AV2_PROB_COST_SHIFT -
-                                                 RD_EPB_SHIFT +
-                                                 PIXEL_TRANSFORM_ERROR_SCALE);
-
-#if WARP_DELTA_PRINT_STATS
-  const uint64_t initial_rd = best_rd;
-  int actual_iters = 0;
-#endif
-
   // Predict delta parameters using image gradients
   const uint16_t *src = ms_params->var_params.ms_buffers.src->buf;
   const int src_stride = ms_params->var_params.ms_buffers.src->stride;
@@ -5272,15 +5260,44 @@ int av2_pick_warp_delta_gradient(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
   const int scale_percent = cpi->sf.inter_sf.warp_delta_grad_step_scale > 0
                                 ? cpi->sf.inter_sf.warp_delta_grad_step_scale
                                 : 100;
-  av2_estimate_warp_delta_from_gradients(src, src_stride, pred, pred_stride, bw,
-                                         bh, mbmi->six_param_warp_model_flag,
-                                         step_size, max_coded_index,
-                                         scale_percent, estimated_deltas);
+  const int64_t sse_base = av2_estimate_warp_delta_from_gradients(
+      src, src_stride, pred, pred_stride, bw, bh,
+      mbmi->six_param_warp_model_flag, step_size, max_coded_index,
+      scale_percent, estimated_deltas);
 
   int has_nonzero_delta = 0;
   for (int k = 0; k < 4; k++) {
     if (estimated_deltas[k] != 0) has_nonzero_delta = 1;
   }
+
+  const int refine_iters = cpi->sf.inter_sf.warp_delta_grad_refine_iters;
+  const int do_refine =
+      (refine_iters > 0 || cpi->sf.inter_sf.warp_delta_search_method ==
+                               WARP_DELTA_GRADIENT_PLUS_REFINE);
+
+  // Compute initial base prediction error and RD
+  best_wm_params = *params;
+  rate = warp_precision_idx_rate +
+         av2_cost_model_param(mbmi, mode_costs, step_size, max_coded_index,
+                              &base_params);
+
+  // Early-Exit Zero-Delta Gating: if deltas are zero and no refinement or MV
+  // refinement is needed, use directly accumulated sse_base and bypass
+  // compute_motion_cost() (skips full 8-tap warp filtering).
+  if (has_nonzero_delta || do_refine || can_refine_mv) {
+    sse = compute_motion_cost(xd, cm, ms_params, bsize, best_mv, can_refine_mv);
+  } else {
+    sse = (int)sse_base;
+  }
+  best_rd = sse + (int)ROUND_POWER_OF_TWO_64((int64_t)rate * error_per_bit,
+                                             RDDIV_BITS + AV2_PROB_COST_SHIFT -
+                                                 RD_EPB_SHIFT +
+                                                 PIXEL_TRANSFORM_ERROR_SCALE);
+
+#if WARP_DELTA_PRINT_STATS
+  const uint64_t initial_rd = best_rd;
+  int actual_iters = 0;
+#endif
 
   if (has_nonzero_delta) {
 #if WARP_DELTA_PRINT_STATS
@@ -5321,9 +5338,7 @@ int av2_pick_warp_delta_gradient(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
   }
 
   // Optional local refinement around the gradient-estimated candidate
-  const int refine_iters = cpi->sf.inter_sf.warp_delta_grad_refine_iters;
-  if (refine_iters > 0 || cpi->sf.inter_sf.warp_delta_search_method ==
-                              WARP_DELTA_GRADIENT_PLUS_REFINE) {
+  if (do_refine) {
     const int iters_to_run = refine_iters > 0 ? refine_iters : 1;
     for (int iter = 0; iter < iters_to_run; iter++) {
 #if WARP_DELTA_PRINT_STATS
@@ -5443,13 +5458,14 @@ int av2_pick_warp_delta_gradient(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
 }
 
 // Estimates delta warp parameters by solving coupled 2x2 normal equations
-void av2_estimate_warp_delta_from_gradients_2x2(
+int64_t av2_estimate_warp_delta_from_gradients_2x2(
     const uint16_t *src, int src_stride, const uint16_t *pred, int pred_stride,
     int bw, int bh, int six_param, int step_size, int max_coded_index,
     int scale_percent, int delta_params[4]) {
   const int center_x = bw / 2 - 1;
   const int center_y = bh / 2 - 1;
   const int S = 1 << WARPEDMODEL_PREC_BITS;
+  int64_t sse_base = 0;
 
   if (six_param) {
     // Two independent 2x2 systems for 6-param AFFINE:
@@ -5483,6 +5499,7 @@ void av2_estimate_warp_delta_from_gradients_2x2(
                            ? (pred_row_next[i] - pred_row_prev[i])
                            : ((pred_row_next[i] - pred_row_prev[i]) >> 1);
         const int e = (int)pred_row[i] - (int)src_row[i];
+        sse_base += (int64_t)e * e;
 
         const int64_t gxx = (int64_t)gx * dx;
         const int64_t gxy = (int64_t)gx * dy;
@@ -5573,6 +5590,7 @@ void av2_estimate_warp_delta_from_gradients_2x2(
                            ? (pred_row_next[i] - pred_row_prev[i])
                            : ((pred_row_next[i] - pred_row_prev[i]) >> 1);
         const int e = (int)pred_row[i] - (int)src_row[i];
+        sse_base += (int64_t)e * e;
 
         const int64_t Jalpha = (int64_t)gx * dx + (int64_t)gy * dy;
         const int64_t Jtheta = (int64_t)gx * dy - (int64_t)gy * dx;
@@ -5611,6 +5629,8 @@ void av2_estimate_warp_delta_from_gradients_2x2(
       delta_params[3] = 0;
     }
   }
+
+  return sse_base;
 }
 
 int av2_pick_warp_delta_gradient_joint_2x2(
@@ -5721,22 +5741,6 @@ int av2_pick_warp_delta_gradient_joint_2x2(
 
   av2_set_warp_translation(mi_row, mi_col, bsize, center_mv.as_mv, params);
 
-  // Compute initial base prediction and initial RD
-  best_wm_params = *params;
-  rate = warp_precision_idx_rate +
-         av2_cost_model_param(mbmi, mode_costs, step_size, max_coded_index,
-                              &base_params);
-  sse = compute_motion_cost(xd, cm, ms_params, bsize, best_mv, can_refine_mv);
-  best_rd = sse + (int)ROUND_POWER_OF_TWO_64((int64_t)rate * error_per_bit,
-                                             RDDIV_BITS + AV2_PROB_COST_SHIFT -
-                                                 RD_EPB_SHIFT +
-                                                 PIXEL_TRANSFORM_ERROR_SCALE);
-
-#if WARP_DELTA_PRINT_STATS
-  const uint64_t initial_rd = best_rd;
-  int actual_iters = 0;
-#endif
-
   // Predict delta parameters using 2x2 coupled image gradients
   const uint16_t *src = ms_params->var_params.ms_buffers.src->buf;
   const int src_stride = ms_params->var_params.ms_buffers.src->stride;
@@ -5747,7 +5751,7 @@ int av2_pick_warp_delta_gradient_joint_2x2(
   const int scale_percent = cpi->sf.inter_sf.warp_delta_grad_step_scale > 0
                                 ? cpi->sf.inter_sf.warp_delta_grad_step_scale
                                 : 100;
-  av2_estimate_warp_delta_from_gradients_2x2(
+  const int64_t sse_base = av2_estimate_warp_delta_from_gradients_2x2(
       src, src_stride, pred, pred_stride, bw, bh,
       mbmi->six_param_warp_model_flag, step_size, max_coded_index,
       scale_percent, estimated_deltas);
@@ -5756,6 +5760,35 @@ int av2_pick_warp_delta_gradient_joint_2x2(
   for (int k = 0; k < 4; k++) {
     if (estimated_deltas[k] != 0) has_nonzero_delta = 1;
   }
+
+  const int refine_iters = cpi->sf.inter_sf.warp_delta_grad_refine_iters;
+  const int do_refine =
+      (refine_iters > 0 || cpi->sf.inter_sf.warp_delta_search_method ==
+                               WARP_DELTA_GRADIENT_JOINT_2X2_PLUS_REFINE);
+
+  // Compute initial base prediction error and RD
+  best_wm_params = *params;
+  rate = warp_precision_idx_rate +
+         av2_cost_model_param(mbmi, mode_costs, step_size, max_coded_index,
+                              &base_params);
+
+  // Early-Exit Zero-Delta Gating: if deltas are zero and no refinement or MV
+  // refinement is needed, use directly accumulated sse_base and bypass
+  // compute_motion_cost() (skips full 8-tap warp filtering).
+  if (has_nonzero_delta || do_refine || (can_refine_mv && !skip_mv_search)) {
+    sse = compute_motion_cost(xd, cm, ms_params, bsize, best_mv, can_refine_mv);
+  } else {
+    sse = (int)sse_base;
+  }
+  best_rd = sse + (int)ROUND_POWER_OF_TWO_64((int64_t)rate * error_per_bit,
+                                             RDDIV_BITS + AV2_PROB_COST_SHIFT -
+                                                 RD_EPB_SHIFT +
+                                                 PIXEL_TRANSFORM_ERROR_SCALE);
+
+#if WARP_DELTA_PRINT_STATS
+  const uint64_t initial_rd = best_rd;
+  int actual_iters = 0;
+#endif
 
   if (has_nonzero_delta) {
 #if WARP_DELTA_PRINT_STATS
@@ -5806,9 +5839,7 @@ int av2_pick_warp_delta_gradient_joint_2x2(
   }
 
   // Optional local refinement around the candidate
-  const int refine_iters = cpi->sf.inter_sf.warp_delta_grad_refine_iters;
-  if (refine_iters > 0 || cpi->sf.inter_sf.warp_delta_search_method ==
-                              WARP_DELTA_GRADIENT_JOINT_2X2_PLUS_REFINE) {
+  if (do_refine) {
     const int iters_to_run = refine_iters > 0 ? refine_iters : 1;
     for (int iter = 0; iter < iters_to_run; iter++) {
 #if WARP_DELTA_PRINT_STATS
