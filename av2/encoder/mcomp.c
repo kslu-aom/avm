@@ -5466,10 +5466,11 @@ int av2_pick_warp_delta_gradient(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
 void av2_estimate_warp_delta_from_gradients_2x2(
     const uint16_t *src, int src_stride, const uint16_t *pred, int pred_stride,
     int bw, int bh, int six_param, int step_size, int max_coded_index,
-    int scale_percent, int delta_params[4]) {
+    int scale_percent, int delta_params[4], int refine_dirs[4]) {
   const int center_x = bw / 2 - 1;
   const int center_y = bh / 2 - 1;
   const int S = 1 << WARPEDMODEL_PREC_BITS;
+  const int j_step = (bh >= 16) ? 2 : 1;
 
   if (six_param) {
     // Two independent 2x2 systems for 6-param AFFINE:
@@ -5482,7 +5483,7 @@ void av2_estimate_warp_delta_from_gradients_2x2(
     int64_t Y00 = 0, Y01 = 0, Y11 = 0;
     int64_t bx0 = 0, bx1 = 0, by0 = 0, by1 = 0;
 
-    for (int j = 0; j < bh; j++) {
+    for (int j = 0; j < bh; j += j_step) {
       const int dy = j - center_y;
       const int j_prev = AVMMAX(0, j - 1);
       const int j_next = AVMMIN(bh - 1, j + 1);
@@ -5540,9 +5541,17 @@ void av2_estimate_warp_delta_from_gradients_2x2(
                        -max_coded_index, max_coded_index);
       delta_params[0] = idx2 * step_size;
       delta_params[1] = idx3 * step_size;
+      if (refine_dirs) {
+        refine_dirs[0] = (raw_dh2 > (double)idx2 * step_size) ? 1 : -1;
+        refine_dirs[1] = (raw_dh3 > (double)idx3 * step_size) ? 1 : -1;
+      }
     } else {
       delta_params[0] = 0;
       delta_params[1] = 0;
+      if (refine_dirs) {
+        refine_dirs[0] = 0;
+        refine_dirs[1] = 0;
+      }
     }
 
     const double detY = (double)Y00 * (double)Y11 - (double)Y01 * (double)Y01;
@@ -5561,9 +5570,17 @@ void av2_estimate_warp_delta_from_gradients_2x2(
                        -max_coded_index, max_coded_index);
       delta_params[2] = idx4 * step_size;
       delta_params[3] = idx5 * step_size;
+      if (refine_dirs) {
+        refine_dirs[2] = (raw_dh4 > (double)idx4 * step_size) ? 1 : -1;
+        refine_dirs[3] = (raw_dh5 > (double)idx5 * step_size) ? 1 : -1;
+      }
     } else {
       delta_params[2] = 0;
       delta_params[3] = 0;
+      if (refine_dirs) {
+        refine_dirs[2] = 0;
+        refine_dirs[3] = 0;
+      }
     }
   } else {
     // 4-parameter ROTZOOM:
@@ -5572,7 +5589,7 @@ void av2_estimate_warp_delta_from_gradients_2x2(
     int64_t A00 = 0, A01 = 0, A11 = 0;
     int64_t b0 = 0, b1 = 0;
 
-    for (int j = 0; j < bh; j++) {
+    for (int j = 0; j < bh; j += j_step) {
       const int dy = j - center_y;
       const int j_prev = AVMMAX(0, j - 1);
       const int j_next = AVMMIN(bh - 1, j + 1);
@@ -5624,11 +5641,23 @@ void av2_estimate_warp_delta_from_gradients_2x2(
       delta_params[1] = idx_theta * step_size;
       delta_params[2] = -delta_params[1];
       delta_params[3] = delta_params[0];
+      if (refine_dirs) {
+        refine_dirs[0] = (raw_alpha > (double)idx_alpha * step_size) ? 1 : -1;
+        refine_dirs[1] = (raw_theta > (double)idx_theta * step_size) ? 1 : -1;
+        refine_dirs[2] = -refine_dirs[1];
+        refine_dirs[3] = refine_dirs[0];
+      }
     } else {
       delta_params[0] = 0;
       delta_params[1] = 0;
       delta_params[2] = 0;
       delta_params[3] = 0;
+      if (refine_dirs) {
+        refine_dirs[0] = 0;
+        refine_dirs[1] = 0;
+        refine_dirs[2] = 0;
+        refine_dirs[3] = 0;
+      }
     }
   }
 }
@@ -5765,13 +5794,14 @@ int av2_pick_warp_delta_gradient_joint_2x2(
   const int pred_stride = xd->plane[0].dst.stride;
 
   int estimated_deltas[4] = { 0 };
+  int refine_dirs[4] = { 0 };
   const int scale_percent = cpi->sf.inter_sf.warp_delta_grad_step_scale > 0
                                 ? cpi->sf.inter_sf.warp_delta_grad_step_scale
                                 : 100;
   av2_estimate_warp_delta_from_gradients_2x2(
       src, src_stride, pred, pred_stride, bw, bh,
       mbmi->six_param_warp_model_flag, step_size, max_coded_index,
-      scale_percent, estimated_deltas);
+      scale_percent, estimated_deltas, refine_dirs);
 
   int has_nonzero_delta = 0;
   for (int k = 0; k < 4; k++) {
@@ -5783,6 +5813,7 @@ int av2_pick_warp_delta_gradient_joint_2x2(
       (refine_iters > 0 || cpi->sf.inter_sf.warp_delta_search_method ==
                                WARP_DELTA_GRADIENT_JOINT_2X2_PLUS_REFINE);
 
+  uint64_t cand_rd = UINT64_MAX;
   if (has_nonzero_delta) {
 #if WARP_DELTA_PRINT_STATS
     actual_iters = 1;
@@ -5825,11 +5856,10 @@ int av2_pick_warp_delta_gradient_joint_2x2(
                                   &base_params);
       sse =
           compute_motion_cost(xd, cm, ms_params, bsize, best_mv, can_refine_mv);
-      const uint64_t cand_rd =
-          sse + (int)ROUND_POWER_OF_TWO_64((int64_t)rate * error_per_bit,
-                                           RDDIV_BITS + AV2_PROB_COST_SHIFT -
-                                               RD_EPB_SHIFT +
-                                               PIXEL_TRANSFORM_ERROR_SCALE);
+      cand_rd = sse + (int)ROUND_POWER_OF_TWO_64(
+                          (int64_t)rate * error_per_bit,
+                          RDDIV_BITS + AV2_PROB_COST_SHIFT - RD_EPB_SHIFT +
+                              PIXEL_TRANSFORM_ERROR_SCALE);
 
       if (cand_rd < best_rd) {
         best_wm_params = *params;
@@ -5838,8 +5868,9 @@ int av2_pick_warp_delta_gradient_joint_2x2(
     }
   }
 
-  // Optional local refinement around the candidate
-  if (do_refine) {
+  // Fast directional refinement: only run if the gradient candidate was
+  // non-zero and successfully reduced RD compared to the base prediction.
+  if (do_refine && has_nonzero_delta && cand_rd < best_rd) {
     const int iters_to_run = refine_iters > 0 ? refine_iters : 1;
     for (int iter = 0; iter < iters_to_run; iter++) {
 #if WARP_DELTA_PRINT_STATS
@@ -5850,53 +5881,43 @@ int av2_pick_warp_delta_gradient_joint_2x2(
            param_index < (mbmi->six_param_warp_model_flag ? 6 : 4);
            param_index++) {
         const WarpedMotionParams center_params = best_wm_params;
-        const int dirs[2] = { 1, -1 };
-        for (int d = 0; d < 2; d++) {
-          const int dir = dirs[d];
-          *params = center_params;
-          params->wmmat[param_index] += dir * step_size;
-          int delta =
-              params->wmmat[param_index] - base_params.wmmat[param_index];
-          if (abs(delta) > max_warp_delta_value) continue;
+        const int p_idx = param_index - 2;
+        const int dir = refine_dirs[p_idx];
+        if (dir == 0) continue;
 
-          if (!mbmi->six_param_warp_model_flag) {
-            params->wmmat[4] = -params->wmmat[3];
-            params->wmmat[5] = params->wmmat[2];
-          }
-          valid = av2_is_warp_model_reduced(params);
-          av2_get_shear_params(params, sf);
-          if (!valid) continue;
+        *params = center_params;
+        params->wmmat[param_index] += dir * step_size;
+        int delta = params->wmmat[param_index] - base_params.wmmat[param_index];
+        if (abs(delta) > max_warp_delta_value) continue;
 
-          av2_set_warp_translation(mi_row, mi_col, bsize, center_mv.as_mv,
-                                   params);
-          rate = warp_precision_idx_rate +
-                 av2_cost_model_param(mbmi, mode_costs, step_size,
-                                      max_coded_index, &base_params);
-          sse = compute_motion_cost(xd, cm, ms_params, bsize, best_mv,
-                                    can_refine_mv);
-          const uint64_t cand_rd =
-              sse + (int)ROUND_POWER_OF_TWO_64(
-                        (int64_t)rate * error_per_bit,
-                        RDDIV_BITS + AV2_PROB_COST_SHIFT - RD_EPB_SHIFT +
-                            PIXEL_TRANSFORM_ERROR_SCALE);
+        if (!mbmi->six_param_warp_model_flag) {
+          params->wmmat[4] = -params->wmmat[3];
+          params->wmmat[5] = params->wmmat[2];
+        }
+        valid = av2_is_warp_model_reduced(params);
+        av2_get_shear_params(params, sf);
+        if (!valid) continue;
 
-          if (cand_rd < best_rd) {
-            best_wm_params = *params;
-            best_rd = cand_rd;
-            center_best = 0;
-          }
+        av2_set_warp_translation(mi_row, mi_col, bsize, center_mv.as_mv,
+                                 params);
+        rate = warp_precision_idx_rate +
+               av2_cost_model_param(mbmi, mode_costs, step_size,
+                                    max_coded_index, &base_params);
+        sse = compute_motion_cost(xd, cm, ms_params, bsize, best_mv,
+                                  can_refine_mv);
+        const uint64_t ref_rd =
+            sse + (int)ROUND_POWER_OF_TWO_64((int64_t)rate * error_per_bit,
+                                             RDDIV_BITS + AV2_PROB_COST_SHIFT -
+                                                 RD_EPB_SHIFT +
+                                                 PIXEL_TRANSFORM_ERROR_SCALE);
+
+        if (ref_rd < best_rd) {
+          best_wm_params = *params;
+          best_rd = ref_rd;
+          center_best = 0;
         }
       }
       if (center_best) break;
-
-      if (can_refine_mv && !skip_mv_search) {
-        *params = best_wm_params;
-        refine_translational_mv(
-            cm, xd, ms_params, mbmi, params, &base_params, &best_wm_params,
-            best_mv, warp_precision_idx_rate, mode_costs, step_size,
-            max_coded_index, num_neighbors, num_mv_iterations, &best_rd);
-        center_mv.as_mv = *best_mv;
-      }
     }
   }
 
@@ -6191,10 +6212,10 @@ int av2_pick_warp_delta(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
         sse = compute_motion_cost(xd, cm, ms_params, bsize, best_mv,
                                   can_refine_mv);
         const uint64_t cand_rd =
-            sse + (int)ROUND_POWER_OF_TWO_64(
-                      (int64_t)rate * error_per_bit,
-                      RDDIV_BITS + AV2_PROB_COST_SHIFT - RD_EPB_SHIFT +
-                          PIXEL_TRANSFORM_ERROR_SCALE);
+            sse + (int)ROUND_POWER_OF_TWO_64((int64_t)rate * error_per_bit,
+                                             RDDIV_BITS + AV2_PROB_COST_SHIFT -
+                                                 RD_EPB_SHIFT +
+                                                 PIXEL_TRANSFORM_ERROR_SCALE);
 
         if (cand_rd < best_rd) {
           best_wm_params = *params;

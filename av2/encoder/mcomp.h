@@ -598,7 +598,7 @@ int av2_pick_warp_delta_gradient(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
 void av2_estimate_warp_delta_from_gradients_2x2(
     const uint16_t *src, int src_stride, const uint16_t *pred, int pred_stride,
     int bw, int bh, int six_param, int step_size, int max_coded_index,
-    int scale_percent, int delta_params[4]);
+    int scale_percent, int delta_params[4], int refine_dirs[4]);
 
 int av2_pick_warp_delta_gradient_joint_2x2(
     const struct AV2_COMP *cpi, MACROBLOCKD *xd, MB_MODE_INFO *mbmi,
