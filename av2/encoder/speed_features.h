@@ -34,27 +34,25 @@ typedef struct MESH_PATTERN {
 
 enum {
   INTRA_ALL = (1 << DC_PRED) | (1 << V_PRED) | (1 << H_PRED) | (1 << D45_PRED) |
-              (1 << D135_PRED) | (1 << D113_PRED) | (1 << D157_PRED) |
-              (1 << D203_PRED) | (1 << D67_PRED) | (1 << SMOOTH_PRED) |
-              (1 << SMOOTH_V_PRED) | (1 << SMOOTH_H_PRED) | (1 << PAETH_PRED),
-  UV_INTRA_ALL =
-      (1 << UV_DC_PRED) | (1 << UV_V_PRED) | (1 << UV_H_PRED) |
+      (1 << D135_PRED) | (1 << D113_PRED) | (1 << D157_PRED) |
+      (1 << D203_PRED) | (1 << D67_PRED) | (1 << SMOOTH_PRED) |
+      (1 << SMOOTH_V_PRED) | (1 << SMOOTH_H_PRED) | (1 << PAETH_PRED),
+  UV_INTRA_ALL = (1 << UV_DC_PRED) | (1 << UV_V_PRED) | (1 << UV_H_PRED) |
       (1 << UV_D45_PRED) | (1 << UV_D135_PRED) | (1 << UV_D113_PRED) |
       (1 << UV_D157_PRED) | (1 << UV_D203_PRED) | (1 << UV_D67_PRED) |
       (1 << UV_SMOOTH_PRED) | (1 << UV_SMOOTH_V_PRED) |
       (1 << UV_SMOOTH_H_PRED) | (1 << UV_PAETH_PRED) | (1 << UV_CFL_PRED),
   UV_INTRA_DC_H_V_CFL = (1 << UV_DC_PRED) | (1 << UV_V_PRED) |
-                        (1 << UV_H_PRED) | (1 << UV_CFL_PRED),
+      (1 << UV_H_PRED) | (1 << UV_CFL_PRED),
   INTRA_DC_H_V = (1 << DC_PRED) | (1 << V_PRED) | (1 << H_PRED),
 };
 
 enum {
   INTER_ALL = (1 << NEARMV) | (1 << GLOBALMV) | (1 << NEWMV) |
-              (1 << WARP_NEWMV) | (1 << NEAR_NEARMV) | (1 << NEW_NEWMV) |
-              (1 << NEAR_NEWMV) | (1 << NEW_NEARMV) | (1 << GLOBAL_GLOBALMV),
+      (1 << WARP_NEWMV) | (1 << NEAR_NEARMV) | (1 << NEW_NEWMV) |
+      (1 << NEAR_NEWMV) | (1 << NEW_NEARMV) | (1 << GLOBAL_GLOBALMV),
   INTER_NEAR_GLOBAL = (1 << NEARMV) | (1 << GLOBALMV) | (1 << GLOBAL_GLOBALMV) |
-                      (1 << NEW_NEARMV) | (1 << NEAR_NEWMV) |
-                      (1 << NEAR_NEARMV),
+      (1 << NEW_NEARMV) | (1 << NEAR_NEWMV) | (1 << NEAR_NEARMV),
 };
 
 typedef enum {
@@ -67,6 +65,11 @@ typedef enum {
       3,  // 2x2 coupled joint solve + translational MV refine
   WARP_DELTA_GRADIENT_JOINT_2X2_PLUS_REFINE =
       4,  // 2x2 coupled joint solve + 1-pass polish + translational MV refine
+  WARP_DELTA_GRADIENT_JOINT_FULL =
+      5,  // Full 4/6-parameter coupled joint solve + translational MV refine
+  WARP_DELTA_GRADIENT_JOINT_FULL_PLUS_REFINE =
+      6,  // Full 4/6-parameter coupled joint solve + 1-pass polish +
+          // translational MV refine
 } WARP_DELTA_SEARCH_METHOD;
 
 /* This enumeration defines when the rate control recode loop will be

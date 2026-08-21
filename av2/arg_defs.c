@@ -575,7 +575,7 @@ const av2_codec_arg_definitions_t g_av2_codec_arg_defs = {
       ARG_DEF(NULL, "warp-delta-search-method", 1,
               "Warp delta parameter search method "
               "(0: step, 1: grad 1x1, 2: grad 1x1+refine, 3: grad 2x2, 4: grad "
-              "2x2+refine, -1: auto)"),
+              "2x2+refine, 5: grad full, 6: grad full+refine, -1: auto)"),
   .warp_delta_grad_step_scale = ARG_DEF(
       NULL, "warp-delta-grad-step-scale", 1,
       "Warp delta gradient search step scaling percentage (default: 100)"),
