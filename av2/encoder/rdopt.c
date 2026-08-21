@@ -5623,6 +5623,15 @@ static void handle_compound_inter_prediction(
       cwp_loop_num = 1;
     if (x->apply_dry_pass_shortcuts) cwp_loop_num = cfg->cwp_loop_cap;
 
+    int_mv ref_mv0 = { 0 };
+    int is_zero_mvd0 = 0;
+    if (have_newmv_in_inter_mode(this_mode)) {
+      ref_mv0 = av2_get_ref_mv(x, 0);
+      update_mv_precision(ref_mv0.as_mv, mbmi->pb_mv_precision,
+                          &ref_mv0.as_mv);
+      is_zero_mvd0 = (cur_mv[0].as_int == ref_mv0.as_int);
+    }
+
     const int same_side = is_ref_frame_same_side(cm, &base_mbmi);
     for (int cwp_search_idx = 1; cwp_search_idx < cwp_loop_num;
          cwp_search_idx++) {
@@ -5636,7 +5645,7 @@ static void handle_compound_inter_prediction(
 
       int_mv cwp_cur_mv[2];
       int rate_mv_cwp = 0;
-      if (have_newmv_in_inter_mode(this_mode)) {
+      if (have_newmv_in_inter_mode(this_mode) && !is_zero_mvd0) {
         if (mbmi->mode != WARPMV &&
             !build_cur_mv(cwp_cur_mv, this_mode, cm, x, skip_repeated_ref_mv)) {
           continue;
@@ -5700,6 +5709,13 @@ static void handle_compound_inter_prediction(
     // =========================================================================
     // 4. JMVD Scaling Factor Search (scale_index = 1 ... N-1, CWP = EQUAL)
     // =========================================================================
+    // If base joint motion search produced zero MVD, scaling the zero MVD
+    // yields identical MVs across all scale factors with higher signaling cost.
+    // In this case, skip all non-zero scale modes.
+    if (is_joint_mvd_coding_mode(this_mode) && is_zero_mvd0) {
+      continue;
+    }
+
     for (int scale_index = 1; scale_index < jmvd_scaling_factor_num;
          ++scale_index) {
       if (x->apply_dry_pass_shortcuts && scale_index > cfg->jmvd_scale_cap)
