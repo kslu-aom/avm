@@ -5634,12 +5634,62 @@ static void handle_compound_inter_prediction(
       cwp_mbmi.cwp_idx = cwp_idx;
       if (!is_cwp_allowed(&cwp_mbmi)) break;
 
+      int_mv cwp_cur_mv[2];
+      int rate_mv_cwp = 0;
+      if (have_newmv_in_inter_mode(this_mode)) {
+        if (mbmi->mode != WARPMV &&
+            !build_cur_mv(cwp_cur_mv, this_mode, cm, x, skip_repeated_ref_mv)) {
+          continue;
+        }
+        if (mbmi->mode == WARPMV) {
+          cwp_cur_mv[0].as_int = 0;
+          cwp_cur_mv[1].as_int = 0;
+          assert(ref_mv_idx[0] == 0 && ref_mv_idx[1] == 0);
+        }
+        if (mbmi->mode != WARPMV && cpi->sf.flexmv_sf.skip_similar_ref_mv &&
+            skip_similar_ref_mv(cpi, x, bsize)) {
+          continue;
+        }
+        mode_info[0][mbmi->pb_mv_precision][ref_mv_idx_type]
+            .full_search_mv.as_int = INVALID_MV;
+        mode_info[0][mbmi->pb_mv_precision][ref_mv_idx_type].mv.as_int =
+            INVALID_MV;
+        mode_info[0][mbmi->pb_mv_precision][ref_mv_idx_type].rd = INT64_MAX;
+        mode_info[0][mbmi->pb_mv_precision][ref_mv_idx_type].drl_cost =
+            drl_cost;
+
+        if (mbmi->mode != WARPMV && !mbmi->refinemv_flag &&
+            !mask_check_bit(idx_mask[0][mbmi->pb_mv_precision],
+                            ref_mv_idx_type)) {
+          continue;
+        }
+
+        *mbmi = cwp_mbmi;
+#if CONFIG_COLLECT_COMPONENT_TIMING
+        start_timing(cpi, handle_newmv_time);
+#endif
+        const int64_t newmv_ret_val =
+            handle_newmv(cpi, x, bsize, cwp_cur_mv, &rate_mv_cwp, args,
+                         mode_info[0][mbmi->pb_mv_precision]);
+#if CONFIG_COLLECT_COMPONENT_TIMING
+        end_timing(cpi, handle_newmv_time);
+#endif
+        if (newmv_ret_val != 0) continue;
+        if (should_skip_newmv(cpi, x, bsize, env, search_state, this_mode, mbmi,
+                              cwp_cur_mv, ref_mv_idx, drl_cost, args))
+          continue;
+      } else {
+        cwp_cur_mv[0] = cur_mv[0];
+        cwp_cur_mv[1] = cur_mv[1];
+        rate_mv_cwp = rate_mv;
+      }
+
       PredictorIterationContext cwp_it_ctx;
       init_predictor_iteration_context(
           &cwp_it_ctx, bsize, ref_mv_idx[0], ref_mv_idx[1], precision_dx, 0,
           ref_mv_idx_type, 0, cwp_search_mask, this_mode, refs,
-          flex_mv_cost, drl_cost, jmvd_scale_mode_cost, base_rate, cur_mv,
-          rate_mv, &cwp_mbmi, 0, num_planes, args->skip_motion_mode);
+          flex_mv_cost, drl_cost, jmvd_scale_mode_cost, base_rate, cwp_cur_mv,
+          rate_mv_cwp, &cwp_mbmi, 0, num_planes, args->skip_motion_mode);
       cwp_it_ctx.refinemv_loop = 0;
       evaluate_inter_predictor(cpi, tile_data, x, env, &cwp_it_ctx,
                                search_state, best_precision_so_far,
@@ -5720,6 +5770,20 @@ static void handle_compound_inter_prediction(
       mbmi->bawp_flag[0] = 0;
       mbmi->bawp_flag[1] = 0;
 
+      mode_info[0][mbmi->pb_mv_precision][ref_mv_idx_type]
+          .full_search_mv.as_int = INVALID_MV;
+      mode_info[0][mbmi->pb_mv_precision][ref_mv_idx_type].mv.as_int =
+          INVALID_MV;
+      mode_info[0][mbmi->pb_mv_precision][ref_mv_idx_type].rd = INT64_MAX;
+      mode_info[0][mbmi->pb_mv_precision][ref_mv_idx_type].drl_cost =
+          drl_cost;
+
+      if (mbmi->mode != WARPMV && !mbmi->refinemv_flag &&
+          !mask_check_bit(idx_mask[0][mbmi->pb_mv_precision],
+                          ref_mv_idx_type)) {
+        continue;
+      }
+
       int rate_mv_scaled = 0;
       if (have_newmv_in_inter_mode(this_mode)) {
 #if CONFIG_COLLECT_COMPONENT_TIMING
@@ -5752,6 +5816,21 @@ static void handle_compound_inter_prediction(
                                search_state, best_precision_so_far,
                                best_precision_dx_so_far,
                                best_precision_rd_so_far);
+
+      const int eval_refinemv_scaled =
+          !(x->apply_dry_pass_shortcuts && cfg->refinemv_cap < 1) &&
+          switchable_refinemv_flag(cm, mbmi) &&
+          !cpi->sf.inter_sf.disable_switchable_refinemv &&
+          !(cpi->sf.inter_sf.prune_refinemv_by_ref_idx &&
+            !(scaled_base_mbmi.ref_frame[0] == 0 &&
+              scaled_base_mbmi.ref_frame[1] == 1));
+      if (eval_refinemv_scaled) {
+        scaled_it_ctx.refinemv_loop = 1;
+        evaluate_inter_predictor(cpi, tile_data, x, env, &scaled_it_ctx,
+                                 search_state, best_precision_so_far,
+                                 best_precision_dx_so_far,
+                                 best_precision_rd_so_far);
+      }
     }
   }
 }
