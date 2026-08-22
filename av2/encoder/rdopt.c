@@ -5617,7 +5617,9 @@ static void handle_compound_inter_prediction(
     // =========================================================================
     // 3. CWP (Compound Weighted Prediction) Search (scale_index = 0, CWP != EQ)
     // =========================================================================
-    int cwp_loop_num = cm->features.enable_cwp ? MAX_CWP_NUM : 1;
+    int cwp_loop_num = (cm->features.enable_cwp && is_cwp_allowed(&base_mbmi))
+                           ? MAX_CWP_NUM
+                           : 1;
     if (search_state->best_cwp_idxs[0] == CWP_EQUAL &&
         (ref_mv_idx[0] > 0 || ref_mv_idx[1] > 0))
       cwp_loop_num = 1;
@@ -5625,11 +5627,26 @@ static void handle_compound_inter_prediction(
 
     int_mv ref_mv0 = { 0 };
     int is_zero_mvd0 = 0;
+    int is_zero_mvd0_row = 0;
+    int is_zero_mvd0_col = 0;
     if (have_newmv_in_inter_mode(this_mode)) {
       ref_mv0 = av2_get_ref_mv(x, 0);
       update_mv_precision(ref_mv0.as_mv, mbmi->pb_mv_precision,
                           &ref_mv0.as_mv);
-      is_zero_mvd0 = (cur_mv[0].as_int == ref_mv0.as_int);
+      is_zero_mvd0_row = (cur_mv[0].as_mv.row == ref_mv0.as_mv.row);
+      is_zero_mvd0_col = (cur_mv[0].as_mv.col == ref_mv0.as_mv.col);
+      is_zero_mvd0 = is_zero_mvd0_row && is_zero_mvd0_col;
+    }
+
+    if (cwp_loop_num > 1) {
+      int has_active_cwp_mask = 0;
+      for (int i = 1; i < cwp_loop_num; ++i) {
+        if (cwp_search_mask[i]) {
+          has_active_cwp_mask = 1;
+          break;
+        }
+      }
+      if (!has_active_cwp_mask) cwp_loop_num = 1;
     }
 
     const int same_side = is_ref_frame_same_side(cm, &base_mbmi);
@@ -5722,6 +5739,11 @@ static void handle_compound_inter_prediction(
         continue;
       if (is_joint_amvd_coding_mode(this_mode, mbmi->use_amvd)) {
         if (scale_index > JOINT_AMVD_SCALE_FACTOR_CNT - 1) continue;
+      } else if (is_joint_mvd_coding_mode(this_mode)) {
+        if ((scale_index == 1 || scale_index == 3) && is_zero_mvd0_row)
+          continue;
+        if ((scale_index == 2 || scale_index == 4) && is_zero_mvd0_col)
+          continue;
       }
       if (cpi->sf.inter_sf.early_terminate_jmvd_scale_factor) {
         if (*search_state->best_rd > 1.5 * *search_state->ref_best_rd &&
@@ -5813,6 +5835,10 @@ static void handle_compound_inter_prediction(
         end_timing(cpi, handle_newmv_time);
 #endif
         if (newmv_ret_val != 0) continue;
+        if (is_joint_mvd_coding_mode(this_mode) &&
+            scaled_cur_mv[0].as_int == ref_mv0.as_int) {
+          continue;
+        }
       }
 
       if (should_skip_newmv(cpi, x, bsize, env, search_state, this_mode, mbmi,
