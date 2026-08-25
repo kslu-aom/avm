@@ -4718,12 +4718,14 @@ static void set_cwp_search_mask(const AV2_COMP *const cpi, MACROBLOCK *const x,
   }
 
   int th = 2;
+  int count = 0;
   for (int i = 0; i < MAX_CWP_NUM; i++) {
-    if (i < th) {
-      mask[idx_list[i]] = 1;
-    } else {
-      mask[idx_list[i]] = 0;
+    if (count < th && cost_list[i] != INT64_MAX && idx_list[i] > 0) {
+      mask[count++] = idx_list[i];
     }
+  }
+  for (int i = count; i < MAX_CWP_NUM; i++) {
+    mask[i] = 0;
   }
 
   return;
@@ -5617,13 +5619,13 @@ static void handle_compound_inter_prediction(
     // =========================================================================
     // 3. CWP (Compound Weighted Prediction) Search (scale_index = 0, CWP != EQ)
     // =========================================================================
-    int cwp_loop_num = (cm->features.enable_cwp && is_cwp_allowed(&base_mbmi))
-                           ? MAX_CWP_NUM
-                           : 1;
+    int cwp_eval_num = (cm->features.enable_cwp && is_cwp_allowed(&base_mbmi))
+                           ? 2
+                           : 0;
     if (search_state->best_cwp_idxs[0] == CWP_EQUAL &&
         (ref_mv_idx[0] > 0 || ref_mv_idx[1] > 0))
-      cwp_loop_num = 1;
-    if (x->apply_dry_pass_shortcuts) cwp_loop_num = cfg->cwp_loop_cap;
+      cwp_eval_num = 0;
+    if (x->apply_dry_pass_shortcuts && cfg->cwp_loop_cap <= 1) cwp_eval_num = 0;
 
     int_mv ref_mv0 = { 0 };
     int is_zero_mvd0 = 0;
@@ -5638,23 +5640,12 @@ static void handle_compound_inter_prediction(
       is_zero_mvd0 = is_zero_mvd0_row && is_zero_mvd0_col;
     }
 
-    if (cwp_loop_num > 1) {
-      int has_active_cwp_mask = 0;
-      for (int i = 1; i < cwp_loop_num; ++i) {
-        if (cwp_search_mask[i]) {
-          has_active_cwp_mask = 1;
-          break;
-        }
-      }
-      if (!has_active_cwp_mask) cwp_loop_num = 1;
-    }
-
     const int same_side = is_ref_frame_same_side(cm, &base_mbmi);
-    for (int cwp_search_idx = 1; cwp_search_idx < cwp_loop_num;
-         cwp_search_idx++) {
+    for (int k = 0; k < cwp_eval_num; k++) {
+      const int cwp_search_idx = cwp_search_mask[k];
+      if (cwp_search_idx <= 0) break;
       const int cwp_idx = cwp_weighting_factor[same_side][cwp_search_idx];
       if (cwp_idx == -1) break;
-      if (cwp_search_mask[cwp_search_idx] == 0) continue;
 
       MB_MODE_INFO cwp_mbmi = base_mbmi;
       cwp_mbmi.cwp_idx = cwp_idx;
