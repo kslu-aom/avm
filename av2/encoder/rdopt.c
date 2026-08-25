@@ -5602,6 +5602,12 @@ static void handle_compound_inter_prediction(
     // =========================================================================
     // 2. Refine MV Search (scale_index = 0, CWP = EQUAL, refinemv_loop = 1)
     // =========================================================================
+    const int64_t base_rd =
+        (*search_state
+              ->mode_info)[0][base_mbmi.pb_mv_precision][ref_mv_idx_type]
+            .rd;
+
+    int refinemv_improved = 0;
     const int eval_refinemv =
         !(x->apply_dry_pass_shortcuts && cfg->refinemv_cap < 1) &&
         switchable_refinemv_flag(cm, mbmi) &&
@@ -5614,6 +5620,13 @@ static void handle_compound_inter_prediction(
                                search_state, best_precision_so_far,
                                best_precision_dx_so_far,
                                best_precision_rd_so_far);
+      const int64_t refinemv_rd =
+          (*search_state
+                ->mode_info)[0][base_mbmi.pb_mv_precision][ref_mv_idx_type]
+              .rd;
+      if (refinemv_rd < base_rd) {
+        refinemv_improved = 1;
+      }
     }
 
     // =========================================================================
@@ -5851,6 +5864,7 @@ static void handle_compound_inter_prediction(
                                best_precision_rd_so_far);
 
       const int eval_refinemv_scaled =
+          (!eval_refinemv || refinemv_improved) &&
           !(x->apply_dry_pass_shortcuts && cfg->refinemv_cap < 1) &&
           switchable_refinemv_flag(cm, mbmi) &&
           !cpi->sf.inter_sf.disable_switchable_refinemv &&
