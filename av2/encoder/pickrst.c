@@ -42,6 +42,9 @@
 // Search level 2 - search only the best drl candidate for the current RU
 #define MERGE_DRL_SEARCH_LEVEL 1
 
+// SIMD vectorization for WienerNS correlation accumulation (1: ON, 0: OFF)
+#define OPT_WIENERNS_SIMD_CORRELATION 0
+
 // Number of elements needed in the temporary buffer for
 // compute_wienerns_filter* functions.
 #define WIENERNS_A_SIZE (WIENERNS_TAPS_MAX * WIENERNS_TAPS_MAX)
@@ -805,6 +808,8 @@ static int64_t finer_tile_search_wienerns(
     rui->wiener_class_id_restrict = -1;
   }
   int64_t best_err = calc_finer_tile_search_error(rsc, limits, tile_rect, rui);
+
+
   // When wiener_class_id != ALL_WIENERNS_CLASSES we are calculating bits for
   // wiener_class_id only since that is the filter we are changing. Should be OK
   // since bits for classes outside wiener_class_id are not needed for decisions
@@ -1640,6 +1645,17 @@ static int compute_wienerns_filter_select_master(
   return 1;
 }
 
+void av2_accumulate_wienerns_correlation_c(double *A_base, double *b_base,
+                                           const int16_t *buf, int16_t y,
+                                           int num_feat) {
+  for (int k = 0; k < num_feat; ++k) {
+    for (int l = 0; l <= k; ++l) {
+      A_base[k * num_feat + l] += (double)buf[k] * (double)buf[l];
+    }
+    b_base[k] += (double)buf[k] * (double)y;
+  }
+}
+
 static int64_t compute_stats_for_wienerns_filter(
     const uint16_t *dgd_hbd, const uint16_t *src_hbd,
     const RestorationTileLimits *limits, int dgd_stride, int src_stride,
@@ -1722,6 +1738,10 @@ static int64_t compute_stats_for_wienerns_filter(
         }
         int16_t y;
         y = ((int64_t)src_hbd[src_id] - dgd_hbd[dgd_id]);
+#if OPT_WIENERNS_SIMD_CORRELATION
+        av2_accumulate_wienerns_correlation(
+            A + c_id * stride_A, b + c_id * stride_b, buf, y, num_feat);
+#else
         for (int k = 0; k < num_feat; ++k) {
           for (int l = 0; l <= k; ++l) {
             A[k * num_feat + l + c_id * stride_A] +=
@@ -1729,6 +1749,7 @@ static int64_t compute_stats_for_wienerns_filter(
           }
           b[k + c_id * stride_b] += (double)buf[k] * (double)y;
         }
+#endif
         real_sse += (int64_t)y * (int64_t)y;
         ++num_pixels_in_class[c_id];
       }
@@ -3378,8 +3399,13 @@ static double optimize_frame_filters_for_target_classes(
   double fraction_rus_to_include[][2] = { { .9, .0 }, { .8, .0 }, { .7, .0 },
                                           { .6, .0 }, { .5, .0 }, { .4, .0 },
                                           { .3, .0 }, { .2, .0 }, { .1, 0 } };
-  const int num_ru_perc_to_try =
-      sizeof(fraction_rus_to_include) / sizeof(*fraction_rus_to_include);
+  int num_ru_perc_to_try =
+      (int)(sizeof(fraction_rus_to_include) / sizeof(*fraction_rus_to_include));
+  int max_iterations = num_ru_perc_to_try + 2;
+  if (rsc->lpf_sf->wienerns_fast_frame_filter_opt) {
+    num_ru_perc_to_try = 0;
+    max_iterations = 1;
+  }
   const int solve_iterations = 1;
   double best_cost = DBL_MAX;
 
@@ -3396,7 +3422,7 @@ static double optimize_frame_filters_for_target_classes(
   // num_ru_perc_to_try times. Then a final round to better optimize the best
   // filter.
   int cnt = 0;
-  while (cnt < num_ru_perc_to_try + 2) {
+  while (cnt < max_iterations) {
     ++cnt;
     RdResults rd_results = { 0 };
     for (int n = 0; n < solve_iterations; ++n) {
@@ -3879,12 +3905,12 @@ void av2_pick_filter_restoration(const YV12_BUFFER_CONFIG *src, AV2_COMP *cpi) {
 
     if (cpi->sf.lpf_sf.reduce_lr_unit_size_by_pyr) {
       // Trim the RU-size search window by pyramid level: drop the largest at
-      // level>=3, and also drop the smallest at level>=5 when drop_low is set.
+      // level>=3 (feature level>=1), and also drop the smallest at level>=5
+      // (feature level>=2).
       const int pyr_level = cm->current_frame.pyramid_level;
       const int drop_high = (pyr_level >= 3);
       const int drop_low =
-          (cpi->sf.lpf_sf.reduce_lr_unit_size_by_pyr_drop_low &&
-           pyr_level >= 5);
+          (cpi->sf.lpf_sf.reduce_lr_unit_size_by_pyr >= 2 && pyr_level >= 5);
       int hi_unit_size = max_unit_size >> drop_high;
       int lo_unit_size = min_unit_size << drop_low;
       if (hi_unit_size < min_unit_size) hi_unit_size = min_unit_size;
