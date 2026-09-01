@@ -1087,12 +1087,13 @@ typedef struct LOOP_FILTER_SPEED_FEATURES {
   // early terminate ccso search by cost threshold
   int early_terminate_ccso_search_by_cost;
 
-  // Control RU-size candidate set pruning by pyramid_level in
-  // av2_pick_filter_restoration() (see pickrst.c).
-  // 0: Off (full search)
-  // 1: Trim largest RU size at deep pyramid levels (pyr_level >= 3)
-  // 2: Trim largest (pyr_level >= 3) and smallest (pyr_level >= 5) RU sizes
+  // If set, trim the RU-size candidate set by pyramid_level in
+  // av2_pick_filter_restoration() (see pickrst.c). Default 0 = full search.
   int reduce_lr_unit_size_by_pyr;
+
+  // Sub-flag of reduce_lr_unit_size_by_pyr. If set, also drop the smallest RU
+  // size at deep pyramid levels. Default 0 keeps the smallest size available.
+  int reduce_lr_unit_size_by_pyr_drop_low;
 
   // If set, use fast search for WIENER_NONSEP frame-level filters: 1 iteration
   // with all RUs, bypassing percentage subsets and qsort.

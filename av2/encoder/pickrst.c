@@ -3905,12 +3905,12 @@ void av2_pick_filter_restoration(const YV12_BUFFER_CONFIG *src, AV2_COMP *cpi) {
 
     if (cpi->sf.lpf_sf.reduce_lr_unit_size_by_pyr) {
       // Trim the RU-size search window by pyramid level: drop the largest at
-      // level>=3 (feature level>=1), and also drop the smallest at level>=5
-      // (feature level>=2).
+      // level>=3, and also drop the smallest at level>=5 when drop_low is set.
       const int pyr_level = cm->current_frame.pyramid_level;
       const int drop_high = (pyr_level >= 3);
       const int drop_low =
-          (cpi->sf.lpf_sf.reduce_lr_unit_size_by_pyr >= 2 && pyr_level >= 5);
+          (cpi->sf.lpf_sf.reduce_lr_unit_size_by_pyr_drop_low &&
+           pyr_level >= 5);
       int hi_unit_size = max_unit_size >> drop_high;
       int lo_unit_size = min_unit_size << drop_low;
       if (hi_unit_size < min_unit_size) hi_unit_size = min_unit_size;
