@@ -43,7 +43,7 @@
 #define MERGE_DRL_SEARCH_LEVEL 1
 
 // SIMD vectorization for WienerNS correlation accumulation (1: ON, 0: OFF)
-#define OPT_WIENERNS_SIMD_CORRELATION 0
+#define OPT_WIENERNS_SIMD_CORRELATION 1
 
 // Number of elements needed in the temporary buffer for
 // compute_wienerns_filter* functions.
