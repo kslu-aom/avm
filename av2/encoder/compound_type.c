@@ -57,6 +57,55 @@ static void count_reuse_comp_call(void) {
 #define REUSE_COMP_STATS_INC(field) ((void)0)
 #endif  // REUSE_COMP_TYPE_STATS
 
+// Speedup macros for wedge mode search.
+// Set to 1 to enable by default as general speedups.
+// The inline helper functions can be easily wired to speed features (cpi->sf)
+// in the future.
+// Note: the wedge sign search speedup is controlled by the
+// fast_wedge_sign_estimate speed feature.
+#ifndef WEDGE_SPEEDUP_HIERARCHICAL_SEARCH
+#define WEDGE_SPEEDUP_HIERARCHICAL_SEARCH \
+  1  // Method 4: Hierarchical Angle-Dist Search
+#endif
+
+#ifndef WEDGE_SPEEDUP_QUADRANT_PRUNING
+#define WEDGE_SPEEDUP_QUADRANT_PRUNING 1  // Method 5: Quadrant-Based Pre-Pruning
+#endif
+
+#if WEDGE_SPEEDUP_HIERARCHICAL_SEARCH
+static AVM_INLINE bool enable_wedge_hierarchical_search(const AV2_COMP *cpi) {
+  (void)cpi;
+  // Easily converted to a speed feature in the future:
+  // return cpi->sf.inter_sf.wedge_hierarchical_search;
+  return true;
+}
+
+// Inserts (new_angle, new_score) into the ascending top_scores list of size
+// max_angles if new_score is among the best max_angles scores.
+static AVM_INLINE void update_top_angles(int *top_angles, int64_t *top_scores,
+                                         int max_angles, int new_angle,
+                                         int64_t new_score) {
+  if (new_score >= top_scores[max_angles - 1]) return;
+
+  int i;
+  for (i = max_angles - 1; i > 0 && new_score < top_scores[i - 1]; --i) {
+    top_scores[i] = top_scores[i - 1];
+    top_angles[i] = top_angles[i - 1];
+  }
+  top_scores[i] = new_score;
+  top_angles[i] = new_angle;
+}
+#endif  // WEDGE_SPEEDUP_HIERARCHICAL_SEARCH
+
+#if WEDGE_SPEEDUP_QUADRANT_PRUNING
+static AVM_INLINE bool enable_wedge_quadrant_pruning(const AV2_COMP *cpi) {
+  (void)cpi;
+  // Easily converted to a speed feature in the future:
+  // return cpi->sf.inter_sf.wedge_quadrant_pruning;
+  return true;
+}
+#endif  // WEDGE_SPEEDUP_QUADRANT_PRUNING
+
 typedef int64_t (*pick_interinter_mask_type)(
     const AV2_COMP *const cpi, MACROBLOCK *x, const BLOCK_SIZE bsize,
     const uint16_t *const p0, const uint16_t *const p1,
@@ -208,12 +257,68 @@ static int get_wedge_cost(const int8_t wedge_index, const MACROBLOCK *const x) {
   return wedge_cost;
 }
 
+// Evaluates one wedge index and updates the best wedge index / sign / rd / sse
+// if it improves on the current best. Returns the best rd of this candidate
+// over the evaluated sign(s).
+// If use_fixed_wedge_sign is true, only fixed_sign is evaluated.
+// Else if sign_ds is non-NULL, only the SSE-optimal sign (determined by
+// av2_wedge_sign_from_residuals() with sign_ds / sign_limit from
+// compute_wedge_sign_deltas()) is evaluated.
+// Otherwise both signs (0 and 1) are evaluated.
+static AVM_INLINE int64_t eval_wedge_candidate(
+    const AV2_COMP *const cpi, const MACROBLOCK *const x, BLOCK_SIZE bsize,
+    const int16_t *const residual1, const int16_t *const diff10,
+    int8_t wedge_index, bool use_fixed_wedge_sign, int8_t fixed_sign,
+    const int16_t *const sign_ds, int64_t sign_limit, int k, int bd_round,
+    int N, int8_t *best_wedge_sign, int8_t *best_wedge_index, int64_t *best_rd,
+    uint64_t *best_sse) {
+  int sign_start = use_fixed_wedge_sign ? fixed_sign : 0;
+  int sign_end = use_fixed_wedge_sign ? fixed_sign : 1;
+  if (!use_fixed_wedge_sign && sign_ds != NULL) {
+    // The sign 1 mask is the complement of the sign 0 mask, and the sign
+    // does not affect the rate, so only the lower-SSE sign can win.
+    const uint8_t *mask0 =
+        av2_get_all_contiguous_soft_mask(wedge_index, 0, bsize, k);
+    sign_start = sign_end =
+        av2_wedge_sign_from_residuals(sign_ds, mask0, N, sign_limit);
+  }
+
+  const int wedge_cost = get_wedge_cost(wedge_index, x);
+  int64_t best_cand_rd = INT64_MAX;
+
+  for (int8_t wedge_sign = sign_start; wedge_sign <= sign_end; ++wedge_sign) {
+    const uint8_t *mask =
+        av2_get_all_contiguous_soft_mask(wedge_index, wedge_sign, bsize, k);
+    uint64_t sse = av2_wedge_sse_from_residuals(residual1, diff10, mask, N);
+    sse = ROUND_POWER_OF_TWO(sse, bd_round);
+
+    int rate;
+    int64_t dist;
+    model_rd_sse_fn[MODELRD_TYPE_MASKED_COMPOUND](cpi, x, bsize, 0, sse, N,
+                                                  &rate, &dist);
+    rate += wedge_cost;
+    const int64_t rd = RDCOST(x->rdmult, rate, dist);
+
+    if (rd < *best_rd) {
+      *best_wedge_index = wedge_index;
+      *best_wedge_sign = wedge_sign;
+      *best_rd = rd;
+      *best_sse = sse;
+    }
+    if (rd < best_cand_rd) best_cand_rd = rd;
+  }
+
+  return best_cand_rd;
+}
+
 // Choose the best wedge index and sign.
 // If use_fixed_wedge_sign is true, only best_wedge_sign is evaluated.
 // Else if sign_ds is non-NULL, for each wedge index only the SSE-optimal sign
 // (determined by av2_wedge_sign_from_residuals() with sign_ds / sign_limit from
 // compute_wedge_sign_deltas()) is evaluated.
 // Otherwise both signs (0 and 1) are evaluated.
+// The set of evaluated wedge indices may be reduced by quadrant pre-pruning
+// (Method 5) and hierarchical angle-distance search (Method 4).
 static int64_t pick_wedge(const AV2_COMP *const cpi, const MACROBLOCK *const x,
                           BLOCK_SIZE bsize, const int16_t *const residual1,
                           const int16_t *const diff10,
@@ -229,49 +334,95 @@ static int64_t pick_wedge(const AV2_COMP *const cpi, const MACROBLOCK *const x,
   const int N = bw * bh;
   assert(N >= 64);
   assert(IMPLIES(use_fixed_wedge_sign, *best_wedge_sign >= 0));
-  int rate;
-  int64_t dist;
-  int64_t rd, best_rd = INT64_MAX;
+  int64_t best_rd = INT64_MAX;
   const int8_t wedge_types = get_wedge_types_lookup(bsize);
   const int bd_round = (xd->bd - 8) * 2;
+  const int k = get_wedge_boundary_type(bsize);
+  const int8_t fixed_sign = use_fixed_wedge_sign ? *best_wedge_sign : 0;
 
-  const bool use_exact_sign = !use_fixed_wedge_sign && sign_ds != NULL;
+  *best_wedge_index = 0;
+  *best_wedge_sign = fixed_sign;
+  *best_boundary_index = k;
+  *best_sse = 0;
 
-  for (int8_t wedge_index = 0; wedge_index < wedge_types; ++wedge_index) {
-    const int k = get_wedge_boundary_type(bsize);
+  bool evaluated[MAX_WEDGE_TYPES] = { false };
+  int64_t cached_rd[MAX_WEDGE_TYPES];
 
-    int sign_start = use_fixed_wedge_sign ? *best_wedge_sign : 0;
-    int sign_end = use_fixed_wedge_sign ? *best_wedge_sign : 1;
-    if (use_exact_sign) {
-      // The sign 1 mask is the complement of the sign 0 mask, and the sign
-      // does not affect the rate, so only the lower-SSE sign can win.
-      const uint8_t *mask0 =
-          av2_get_all_contiguous_soft_mask(wedge_index, 0, bsize, k);
-      sign_start = sign_end =
-          av2_wedge_sign_from_residuals(sign_ds, mask0, N, sign_limit);
+#define EVAL_CANDIDATE(idx)                                                 \
+  (!evaluated[(idx)]                                                        \
+       ? (evaluated[(idx)] = true,                                          \
+          cached_rd[(idx)] = eval_wedge_candidate(                          \
+              cpi, x, bsize, residual1, diff10, (int8_t)(idx),              \
+              use_fixed_wedge_sign, fixed_sign, sign_ds, sign_limit, k,     \
+              bd_round, N, best_wedge_sign, best_wedge_index, &best_rd,     \
+              best_sse))                                                    \
+       : cached_rd[(idx)])
+
+  // Method 5: Quadrant-based pre-pruning. Evaluate one anchor wedge per
+  // quadrant and only search the best 2 quadrants.
+  bool quad_allowed[WEDGE_QUADS] = { true, true, true, true };
+#if WEDGE_SPEEDUP_QUADRANT_PRUNING
+  if (enable_wedge_quadrant_pruning(cpi) && wedge_types == MAX_WEDGE_TYPES) {
+    static const int quad_anchor_angles[WEDGE_QUADS] = { 2, 7, 12, 17 };
+    int64_t quad_rd[WEDGE_QUADS];
+    for (int q = 0; q < WEDGE_QUADS; ++q) {
+      const int anchor_idx = wedge_angle_dist_2_index[quad_anchor_angles[q]][2];
+      assert(anchor_idx >= 0 && anchor_idx < wedge_types);
+      quad_rd[q] = EVAL_CANDIDATE(anchor_idx);
     }
-
-    for (int8_t wedge_sign = sign_start; wedge_sign <= sign_end; ++wedge_sign) {
-      const uint8_t *mask =
-          av2_get_all_contiguous_soft_mask(wedge_index, wedge_sign, bsize, k);
-      uint64_t sse = av2_wedge_sse_from_residuals(residual1, diff10, mask, N);
-      sse = ROUND_POWER_OF_TWO(sse, bd_round);
-
-      model_rd_sse_fn[MODELRD_TYPE_MASKED_COMPOUND](cpi, x, bsize, 0, sse, N,
-                                                    &rate, &dist);
-
-      rate += get_wedge_cost(wedge_index, x);
-      rd = RDCOST(x->rdmult, rate, dist);
-
-      if (rd < best_rd) {
-        *best_wedge_index = wedge_index;
-        *best_wedge_sign = wedge_sign;
-        *best_boundary_index = k;
-        best_rd = rd;
-        *best_sse = sse;
+    int q_order[WEDGE_QUADS] = { 0, 1, 2, 3 };
+    for (int i = 0; i < WEDGE_QUADS - 1; ++i) {
+      for (int j = i + 1; j < WEDGE_QUADS; ++j) {
+        if (quad_rd[q_order[j]] < quad_rd[q_order[i]]) {
+          const int tmp = q_order[i];
+          q_order[i] = q_order[j];
+          q_order[j] = tmp;
+        }
       }
     }
+    for (int q = 0; q < WEDGE_QUADS; ++q) quad_allowed[q] = false;
+    quad_allowed[q_order[0]] = true;
+    quad_allowed[q_order[1]] = true;
   }
+#endif  // WEDGE_SPEEDUP_QUADRANT_PRUNING
+
+  // Method 4: Hierarchical angle-distance search. Evaluate the central
+  // distance of every allowed angle, then refine the other distances only on
+  // the best 3 angles.
+#if WEDGE_SPEEDUP_HIERARCHICAL_SEARCH
+  if (enable_wedge_hierarchical_search(cpi) && wedge_types == MAX_WEDGE_TYPES) {
+    int top_angles[3] = { -1, -1, -1 };
+    int64_t top_angle_rd[3] = { INT64_MAX, INT64_MAX, INT64_MAX };
+
+    for (int a = 0; a < WEDGE_ANGLES; ++a) {
+      if (!quad_allowed[a / QUAD_WEDGE_ANGLES]) continue;
+      const int idx = wedge_angle_dist_2_index[a][2];
+      assert(idx >= 0 && idx < wedge_types);
+      update_top_angles(top_angles, top_angle_rd, 3, a, EVAL_CANDIDATE(idx));
+    }
+
+    for (int i = 0; i < 3; ++i) {
+      const int a = top_angles[i];
+      if (a < 0) continue;
+      for (int d = 0; d < NUM_WEDGE_DIST; ++d) {
+        if (d == 2) continue;  // Central distance already evaluated.
+        const int idx = wedge_angle_dist_2_index[a][d];
+        if (idx == -1) continue;
+        assert(idx < wedge_types);
+        EVAL_CANDIDATE(idx);
+      }
+    }
+  } else
+#endif  // WEDGE_SPEEDUP_HIERARCHICAL_SEARCH
+  {
+    for (int8_t wedge_index = 0; wedge_index < wedge_types; ++wedge_index) {
+      const int angle = wedge_index_2_angle[wedge_index];
+      if (!quad_allowed[angle / QUAD_WEDGE_ANGLES]) continue;
+      EVAL_CANDIDATE(wedge_index);
+    }
+  }
+
+#undef EVAL_CANDIDATE
 
   return best_rd - RDCOST(x->rdmult, get_wedge_cost(*best_wedge_index, x), 0);
 }
