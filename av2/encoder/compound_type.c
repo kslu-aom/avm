@@ -19,6 +19,44 @@
 #include "av2/encoder/reconinter_enc.h"
 #include "av2/encoder/tx_search.h"
 
+// Temporary instrumentation for reuse_compound_type_data: prints hit/miss
+// counters to stderr when the encoder process exits.
+#define REUSE_COMP_TYPE_STATS 1
+#if REUSE_COMP_TYPE_STATS
+#include <stdio.h>
+#include <stdlib.h>
+static struct {
+  long long calls;        // av2_compound_type_rd() calls with reuse enabled
+  long long matches;      // exact match found in comp_rd_stats
+  long long refine_skip;  // candidates rejected only by refinemv mismatch
+  long long shortcut;     // level-2 decision reused (full search skipped)
+  long long fallback;     // level-2 match, winner stats invalid -> search
+} reuse_comp_stats;
+
+static void print_reuse_comp_stats(void) {
+  if (!reuse_comp_stats.calls) return;
+  fprintf(stderr,
+          "reuse_comp_stats: calls %lld matches %lld (%.2f%%) "
+          "refine_skip %lld shortcut %lld fallback %lld\n",
+          reuse_comp_stats.calls, reuse_comp_stats.matches,
+          100.0 * reuse_comp_stats.matches / reuse_comp_stats.calls,
+          reuse_comp_stats.refine_skip, reuse_comp_stats.shortcut,
+          reuse_comp_stats.fallback);
+}
+
+static void count_reuse_comp_call(void) {
+  static int registered = 0;
+  if (!registered) {
+    registered = 1;
+    atexit(print_reuse_comp_stats);
+  }
+  ++reuse_comp_stats.calls;
+}
+#define REUSE_COMP_STATS_INC(field) (++reuse_comp_stats.field)
+#else
+#define REUSE_COMP_STATS_INC(field) ((void)0)
+#endif  // REUSE_COMP_TYPE_STATS
+
 typedef int64_t (*pick_interinter_mask_type)(
     const AV2_COMP *const cpi, MACROBLOCK *x, const BLOCK_SIZE bsize,
     const uint16_t *const p0, const uint16_t *const p1,
@@ -41,6 +79,7 @@ static AVM_INLINE int is_comp_rd_match(const AV2_COMP *const cpi,
                                        const MACROBLOCK *const x,
                                        const COMP_RD_STATS *st,
                                        const MB_MODE_INFO *const mi,
+                                       bool is_refinemv_mode,
                                        CompTypeRdStats *comp_stats) {
   // TODO(ranjit): Ensure that compound type search use regular filter always
   // and check if following check can be removed.
@@ -60,7 +99,14 @@ static AVM_INLINE int is_comp_rd_match(const AV2_COMP *const cpi,
     if (is_global_mv_block(mi, wm->wmtype) != st->is_global[i]) return 0;
   }
 
-  // TODO(any): Consider tools like OPFL, SMVR in the match criteria.
+  // An MV refinement mode (OPFL / refinemv) builds a different predictor
+  // than an unrefined mode with the same MVs, so never match across them.
+  if (st->is_refinemv_mode != is_refinemv_mode) {
+    REUSE_COMP_STATS_INC(refine_skip);
+    return 0;
+  }
+
+  // TODO(any): Consider tools like SMVR in the match criteria.
 
   // Store the stats for COMPOUND_AVERAGE.
   comp_stats[COMPOUND_AVERAGE] = st->rd_stats[COMPOUND_AVERAGE];
@@ -81,12 +127,14 @@ static AVM_INLINE int is_comp_rd_match(const AV2_COMP *const cpi,
 static AVM_INLINE int find_comp_rd_in_stats(const AV2_COMP *const cpi,
                                             const MACROBLOCK *x,
                                             const MB_MODE_INFO *const mbmi,
+                                            bool is_refinemv_mode,
                                             CompTypeRdStats *comp_stats,
                                             int *match_index) {
   if (mbmi->cwp_idx != CWP_EQUAL) return 0;
 
   for (int j = 0; j < x->comp_rd_stats_idx; ++j) {
-    if (is_comp_rd_match(cpi, x, &x->comp_rd_stats[j], mbmi, comp_stats)) {
+    if (is_comp_rd_match(cpi, x, &x->comp_rd_stats[j], mbmi,
+                         is_refinemv_mode, comp_stats)) {
       *match_index = j;
       return 1;
     }
@@ -874,8 +922,10 @@ static AVM_INLINE int populate_reuse_comp_type_data(
   const int winner_comp_type =
       x->comp_rd_stats[match_index].interinter_comp.type;
   const CompTypeRdStats *const winner_stats = &comp_stats[winner_comp_type];
-  if (winner_stats->rate == INT32_MAX)
-    return best_type_stats->best_compmode_interinter_cost;
+  // The caller only takes this path when the winner's stats are available;
+  // otherwise *rd and the compound type would be left unset.
+  assert(winner_stats->rate != INT32_MAX);
+  (void)best_type_stats;
 
   update_mbmi_for_compound_type(mbmi, winner_comp_type);
   mbmi->interinter_comp = x->comp_rd_stats[match_index].interinter_comp;
@@ -903,7 +953,8 @@ static AVM_INLINE void update_best_info(const MB_MODE_INFO *const mbmi,
 
 static AVM_INLINE void save_comp_rd_search_stat(
     MACROBLOCK *x, const MB_MODE_INFO *const mbmi,
-    const CompTypeRdStats *comp_stats, const int_mv *cur_mv) {
+    const CompTypeRdStats *comp_stats, const int_mv *cur_mv,
+    bool is_refinemv_mode) {
   if (mbmi->cwp_idx != CWP_EQUAL) return;
   const int offset = x->comp_rd_stats_idx;
   if (offset < MAX_COMP_RD_STATS) {
@@ -915,6 +966,7 @@ static AVM_INLINE void save_comp_rd_search_stat(
     rd_stats->interp_fltr = mbmi->interp_fltr;
     av2_copy(rd_stats->ref_mv_idx, mbmi->ref_mv_idx);
     rd_stats->cwp_idx = mbmi->cwp_idx;
+    rd_stats->is_refinemv_mode = is_refinemv_mode;
     const MACROBLOCKD *const xd = &x->e_mbd;
     for (int i = 0; i < 2; ++i) {
       const WarpedMotionParams *const wm =
@@ -1146,21 +1198,36 @@ int av2_compound_type_rd(const AV2_COMP *const cpi, MACROBLOCK *x,
   init_comp_type_rd_stats(comp_stats);
   int match_index = 0;
 
-  const int reuse_compound_type_data = inter_sf->reuse_compound_type_data;
-  const int match_found =
-      reuse_compound_type_data
-          ? find_comp_rd_in_stats(cpi, x, mbmi, comp_stats, &match_index)
-          : 0;
-
   const bool is_refinemv_mode =
       this_mode >= NEAR_NEARMV_OPTFLOW ||
       (mbmi->refinemv_flag && switchable_refinemv_flag(cm, mbmi));
 
-  // If the match is found, calculate the rd cost using the
-  // stored stats and update the mbmi appropriately.
+  const int reuse_compound_type_data = inter_sf->reuse_compound_type_data;
+#if REUSE_COMP_TYPE_STATS
+  if (reuse_compound_type_data) count_reuse_comp_call();
+#endif
+  const int match_found =
+      reuse_compound_type_data
+          ? find_comp_rd_in_stats(cpi, x, mbmi, is_refinemv_mode, comp_stats,
+                                  &match_index)
+          : 0;
+  if (match_found) REUSE_COMP_STATS_INC(matches);
+
+  // If the match is found, calculate the rd cost using the stored stats and
+  // update the mbmi appropriately. This is only possible when the stats of the
+  // stored winner were copied (e.g. wedge/diffwtd stats are not reused when
+  // NEWMV is involved); otherwise fall through to the regular search, which
+  // still reuses whatever per-type stats are available.
   if (match_found && !is_refinemv_mode && reuse_compound_type_data >= 2) {
-    return populate_reuse_comp_type_data(x, mbmi, &best_type_stats, cur_mv,
-                                         comp_stats, rate_mv, rd, match_index);
+    const COMPOUND_TYPE winner_comp_type =
+        x->comp_rd_stats[match_index].interinter_comp.type;
+    if (comp_stats[winner_comp_type].rate != INT32_MAX) {
+      REUSE_COMP_STATS_INC(shortcut);
+      return populate_reuse_comp_type_data(x, mbmi, &best_type_stats, cur_mv,
+                                           comp_stats, rate_mv, rd,
+                                           match_index);
+    }
+    REUSE_COMP_STATS_INC(fallback);
   }
 
   // Determine the number of valid compound types to be
@@ -1318,6 +1385,6 @@ int av2_compound_type_rd(const AV2_COMP *const cpi, MACROBLOCK *x,
 
   restore_dst_buf(xd, *orig_dst, 1);
   if (!match_found && reuse_compound_type_data)
-    save_comp_rd_search_stat(x, mbmi, comp_stats, cur_mv);
+    save_comp_rd_search_stat(x, mbmi, comp_stats, cur_mv, is_refinemv_mode);
   return best_type_stats.best_compmode_interinter_cost;
 }

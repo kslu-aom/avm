@@ -423,6 +423,9 @@ typedef struct {
   INTERINTER_COMPOUND_DATA interinter_comp;
   //! Index for compound weighted prediction parameters.
   int cwp_idx;
+  //! Whether the stats come from an MV refinement mode (OPFL / refinemv),
+  //! whose predictor differs from the unrefined one with the same MVs.
+  int is_refinemv_mode;
 } COMP_RD_STATS;
 
 /*! \brief Contains color maps used in palette mode.
