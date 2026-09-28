@@ -1006,8 +1006,9 @@ static int64_t masked_compound_type_rd(
       compound_type == COMPOUND_WEDGE) {
     unsigned int sse;
     (void)cpi->fn_ptr[bsize].vf(pred0, stride, pred1, stride, &sse);
+    const int bd_shift = 2 * (cpi->common.seq_params.bit_depth - 8);
     const unsigned int mse =
-        ROUND_POWER_OF_TWO(sse, num_pels_log2_lookup[bsize]);
+        ROUND_POWER_OF_TWO(sse, num_pels_log2_lookup[bsize] + bd_shift);
     // If two predictors are very similar, skip wedge compound mode search.
     if (mse < 8 || (!have_newmv_in_inter_mode(this_mode) && mse < 64)) {
       *comp_model_rd_cur = INT64_MAX;
