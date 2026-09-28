@@ -113,69 +113,33 @@ static AVM_INLINE bool enable_wedge_interintra_search(
          cpi->oxcf.comp_type_cfg.enable_interintra_wedge;
 }
 
-static int8_t estimate_wedge_sign(const AV2_COMP *cpi, const MACROBLOCK *x,
-                                  const BLOCK_SIZE bsize, const uint16_t *pred0,
-                                  int stride0, const uint16_t *pred1,
-                                  int stride1) {
-  /* clang-format off */
-  static const BLOCK_SIZE split_qtr[BLOCK_SIZES_ALL] = {
-    //                            4X4
-    BLOCK_INVALID,
-    // 4X8,        8X4,           8X8
-    BLOCK_INVALID, BLOCK_INVALID, BLOCK_4X4,
-    // 8X16,       16X8,          16X16
-    BLOCK_4X8, BLOCK_8X4, BLOCK_8X8,
-    // 16X32,      32X16,         32X32
-    BLOCK_8X16, BLOCK_16X8, BLOCK_16X16,
-    // 32X64,      64X32,         64X64
-    BLOCK_16X32, BLOCK_32X16, BLOCK_32X32,
-    // 64x128,     128x64,        128x128
-    BLOCK_32X64, BLOCK_64X32, BLOCK_64X64,
-    // 128X256,    256X128,       256X256
-    BLOCK_64X128, BLOCK_128X64, BLOCK_128X128,
-    // 4X16,       16X4,          8X32
-    BLOCK_INVALID, BLOCK_INVALID, BLOCK_4X16,
-    // 32X8,       16X64,         64X16
-    BLOCK_16X4, BLOCK_8X32, BLOCK_32X8,
-    // 32X4,       4X32,          64X8
-    BLOCK_INVALID, BLOCK_INVALID, BLOCK_32X4,
-    // 8x64
-    BLOCK_4X32
-  };
-  /* clang-format on */
-  const struct macroblock_plane *const p = &x->plane[AVM_PLANE_Y];
-  const uint16_t *src = p->src.buf;
-  int src_stride = p->src.stride;
-  const int bw = block_size_wide[bsize];
-  const int bh = block_size_high[bsize];
-  const int bw_by2 = bw >> 1;
-  const int bh_by2 = bh >> 1;
-  uint32_t esq[2][2];
-  int64_t tl, br;
-
-  const BLOCK_SIZE f_index = split_qtr[bsize];
-  assert(f_index != BLOCK_INVALID);
-
-  // Residual variance computation over relevant quandrants in order to
-  // find TL + BR, TL = sum(1st,2nd,3rd) quadrants of (pred0 - pred1),
-  // BR = sum(2nd,3rd,4th) quadrants of (pred1 - pred0)
-  // The 2nd and 3rd quadrants cancel out in TL + BR
-  // Hence TL + BR = 1st quadrant of (pred0-pred1) + 4th of (pred1-pred0)
-  // TODO(nithya): Sign estimation assumes 45 degrees (1st and 4th quadrants)
-  // for all codebooks; experiment with other quadrant combinations for
-  // 0, 90 and 135 degrees also.
-  cpi->fn_ptr[f_index].vf(src, src_stride, pred0, stride0, &esq[0][0]);
-  cpi->fn_ptr[f_index].vf(src + bh_by2 * src_stride + bw_by2, src_stride,
-                          pred0 + bh_by2 * stride0 + bw_by2, stride0,
-                          &esq[0][1]);
-  cpi->fn_ptr[f_index].vf(src, src_stride, pred1, stride1, &esq[1][0]);
-  cpi->fn_ptr[f_index].vf(src + bh_by2 * src_stride + bw_by2, src_stride,
-                          pred1 + bh_by2 * stride1 + bw_by2, stride0,
-                          &esq[1][1]);
-
-  tl = ((int64_t)esq[0][0]) - ((int64_t)esq[1][0]);
-  br = ((int64_t)esq[1][1]) - ((int64_t)esq[0][1]);
-  return (tl + br > 0);
+// Prepares the inputs for av2_wedge_sign_from_residuals(), which picks the
+// exact SSE-optimal sign for each wedge mask with a single dot product.
+// Fills ds[i] = r0[i]^2 - r1[i]^2, where r0 = src - pred0 = residual1 + diff10
+// and r1 = src - pred1 = residual1, and returns the matching threshold
+// limit = MAX_MASK_VALUE / 2 * sum(ds).
+// For high bitdepth the residuals are first scaled down by (bd - 8) so that the
+// squares fit the 16-bit ds buffer used by the SIMD sign kernel (ds is
+// saturated to 16 bits, as in av2_wedge_compute_delta_squares()). The limit is
+// derived from the saturated ds itself so that the sign decision
+//   sum((mask - MAX_MASK_VALUE / 2) * ds) > 0
+// stays self-consistent.
+static int64_t compute_wedge_sign_deltas(int bd, const int16_t *residual1,
+                                         const int16_t *diff10, int N,
+                                         int16_t *ds) {
+  const int shift = bd - 8;
+  int64_t sum_ds = 0;
+  for (int i = 0; i < N; ++i) {
+    int32_t r0 = (int32_t)residual1[i] + diff10[i];
+    int32_t r1 = residual1[i];
+    if (shift > 0) {
+      r0 = ROUND_POWER_OF_TWO_SIGNED(r0, shift);
+      r1 = ROUND_POWER_OF_TWO_SIGNED(r1, shift);
+    }
+    ds[i] = (int16_t)clamp(r0 * r0 - r1 * r1, INT16_MIN, INT16_MAX);
+    sum_ds += ds[i];
+  }
+  return ((1 << WEDGE_WEIGHT_BITS) / 2) * sum_ds;
 }
 
 static int get_wedge_cost(const int8_t wedge_index, const MACROBLOCK *const x) {
@@ -197,12 +161,16 @@ static int get_wedge_cost(const int8_t wedge_index, const MACROBLOCK *const x) {
 }
 
 // Choose the best wedge index and sign.
-// If use_fixed_wedge_sign is true, only best_wedge_sign is evaluated else both
-// signs (0 and 1) are evaluated.
+// If use_fixed_wedge_sign is true, only best_wedge_sign is evaluated.
+// Else if sign_ds is non-NULL, for each wedge index only the SSE-optimal sign
+// (determined by av2_wedge_sign_from_residuals() with sign_ds / sign_limit from
+// compute_wedge_sign_deltas()) is evaluated.
+// Otherwise both signs (0 and 1) are evaluated.
 static int64_t pick_wedge(const AV2_COMP *const cpi, const MACROBLOCK *const x,
                           BLOCK_SIZE bsize, const int16_t *const residual1,
                           const int16_t *const diff10,
                           bool use_fixed_wedge_sign,
+                          const int16_t *const sign_ds, int64_t sign_limit,
                           int8_t *const best_wedge_sign,
                           int8_t *const best_wedge_index,
                           int8_t *const best_boundary_index,
@@ -219,11 +187,21 @@ static int64_t pick_wedge(const AV2_COMP *const cpi, const MACROBLOCK *const x,
   const int8_t wedge_types = get_wedge_types_lookup(bsize);
   const int bd_round = (xd->bd - 8) * 2;
 
-  const int sign_start = use_fixed_wedge_sign ? *best_wedge_sign : 0;
-  const int sign_end = use_fixed_wedge_sign ? *best_wedge_sign : 1;
+  const bool use_exact_sign = !use_fixed_wedge_sign && sign_ds != NULL;
 
   for (int8_t wedge_index = 0; wedge_index < wedge_types; ++wedge_index) {
     const int k = get_wedge_boundary_type(bsize);
+
+    int sign_start = use_fixed_wedge_sign ? *best_wedge_sign : 0;
+    int sign_end = use_fixed_wedge_sign ? *best_wedge_sign : 1;
+    if (use_exact_sign) {
+      // The sign 1 mask is the complement of the sign 0 mask, and the sign
+      // does not affect the rate, so only the lower-SSE sign can win.
+      const uint8_t *mask0 =
+          av2_get_all_contiguous_soft_mask(wedge_index, 0, bsize, k);
+      sign_start = sign_end =
+          av2_wedge_sign_from_residuals(sign_ds, mask0, N, sign_limit);
+    }
 
     for (int8_t wedge_sign = sign_start; wedge_sign <= sign_end; ++wedge_sign) {
       const uint8_t *mask =
@@ -257,7 +235,8 @@ static int64_t pick_interinter_wedge(
     uint64_t *best_sse) {
   MACROBLOCKD *const xd = &x->e_mbd;
   MB_MODE_INFO *const mbmi = xd->mi[0];
-  const int bw = block_size_wide[bsize];
+  (void)p0;
+  (void)p1;
 
   int8_t wedge_index = -1;
   int8_t boundary_index = -1;
@@ -266,15 +245,20 @@ static int64_t pick_interinter_wedge(
   assert(is_interinter_compound_used(COMPOUND_WEDGE, bsize));
   assert(cpi->common.seq_params.enable_masked_compound);
 
-  bool use_fixed_wedge_sign = false;
+  DECLARE_ALIGNED(32, int16_t, sign_ds[MAX_SB_SQUARE]);
+  const int16_t *sign_ds_ptr = NULL;
+  int64_t sign_limit = 0;
   if (cpi->sf.inter_sf.fast_wedge_sign_estimate) {
-    wedge_sign = estimate_wedge_sign(cpi, x, bsize, p0, bw, p1, bw);
-    use_fixed_wedge_sign = true;
+    const int N = block_size_wide[bsize] * block_size_high[bsize];
+    sign_limit =
+        compute_wedge_sign_deltas(xd->bd, residual1, diff10, N, sign_ds);
+    sign_ds_ptr = sign_ds;
   }
 
-  const int64_t rd =
-      pick_wedge(cpi, x, bsize, residual1, diff10, use_fixed_wedge_sign,
-                 &wedge_sign, &wedge_index, &boundary_index, best_sse);
+  const int64_t rd = pick_wedge(
+      cpi, x, bsize, residual1, diff10, /*use_fixed_wedge_sign=*/false,
+      sign_ds_ptr, sign_limit, &wedge_sign, &wedge_index, &boundary_index,
+      best_sse);
 
   mbmi->interinter_comp.wedge_sign = wedge_sign;
   mbmi->interinter_comp.wedge_index = wedge_index;
@@ -354,8 +338,10 @@ static int64_t pick_interintra_wedge(const AV2_COMP *const cpi,
   int8_t boundary_index = -1;
   uint64_t sse;
   const int64_t rd = pick_wedge(cpi, x, bsize, residual1, diff10,
-                                /*use_fixed_wedge_sign*/ true, &wedge_sign,
-                                &wedge_index, &boundary_index, &sse);
+                                /*use_fixed_wedge_sign*/ true,
+                                /*sign_ds=*/NULL, /*sign_limit=*/0,
+                                &wedge_sign, &wedge_index, &boundary_index,
+                                &sse);
 
   mbmi->interintra_wedge_index = wedge_index;
   mbmi->wedge_boundary_index = boundary_index;
