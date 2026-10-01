@@ -394,7 +394,6 @@ static void set_good_speed_features_framesize_independent(
     sf->inter_sf.warp_delta_search_method = WARP_DELTA_GRADIENT_JOINT_2X2;
     sf->inter_sf.warp_delta_grad_step_scale = 100;
     sf->inter_sf.warp_delta_grad_refine_iters = 0;
-    sf->inter_sf.prune_warp_delta_precision_search = 1;
 
     // Cap the DRL depth for a fresh single-ref NEWMV search; reuse the
     // nearest searched result beyond the cap.
@@ -857,7 +856,10 @@ static AVM_INLINE void init_inter_sf(INTER_MODE_SPEED_FEATURES *inter_sf) {
   inter_sf->warp_delta_search_method = WARP_DELTA_STEP_SEARCH;
   inter_sf->warp_delta_grad_step_scale = 100;
   inter_sf->warp_delta_grad_refine_iters = 0;
-  inter_sf->prune_warp_delta_precision_search = 0;
+  inter_sf->warp_delta_rdlat_num_cands = 2;
+  inter_sf->warp_delta_rdlat_iters = 1;
+  inter_sf->warp_delta_rdlat_mv_refine = 1;
+  inter_sf->warp_delta_rdlat_polish = 0;
   inter_sf->prune_comp_using_best_single_mode_ref = 0;
   inter_sf->prune_mode_search_simple_translation = 0;
   inter_sf->prune_comp_type_by_comp_avg = 0;
@@ -1238,10 +1240,33 @@ void av2_set_speed_features_framesize_independent(AV2_COMP *cpi, int speed) {
   if (env_wd_refine) {
     sf->inter_sf.warp_delta_grad_refine_iters = atoi(env_wd_refine);
   }
-  const char *env_wd_prune_prec = getenv("WARP_DELTA_PRUNE_PRECISION");
-  if (env_wd_prune_prec) {
-    sf->inter_sf.prune_warp_delta_precision_search = atoi(env_wd_prune_prec);
-  }
+  const MotionModeCfg *const mm_cfg = &cpi->oxcf.motion_mode_cfg;
+  if (mm_cfg->warp_delta_rdlat_num_cands >= 0)
+    sf->inter_sf.warp_delta_rdlat_num_cands =
+        mm_cfg->warp_delta_rdlat_num_cands;
+  if (mm_cfg->warp_delta_rdlat_iters >= 0)
+    sf->inter_sf.warp_delta_rdlat_iters = mm_cfg->warp_delta_rdlat_iters;
+  if (mm_cfg->warp_delta_rdlat_mv_refine >= 0)
+    sf->inter_sf.warp_delta_rdlat_mv_refine =
+        mm_cfg->warp_delta_rdlat_mv_refine;
+  if (mm_cfg->warp_delta_rdlat_polish >= 0)
+    sf->inter_sf.warp_delta_rdlat_polish = mm_cfg->warp_delta_rdlat_polish;
+  const char *env_rdlat_cands = getenv("WARP_DELTA_RDLAT_CANDS");
+  if (env_rdlat_cands)
+    sf->inter_sf.warp_delta_rdlat_num_cands = atoi(env_rdlat_cands);
+  const char *env_rdlat_iters = getenv("WARP_DELTA_RDLAT_ITERS");
+  if (env_rdlat_iters)
+    sf->inter_sf.warp_delta_rdlat_iters = atoi(env_rdlat_iters);
+  const char *env_rdlat_mvref = getenv("WARP_DELTA_RDLAT_MV_REFINE");
+  if (env_rdlat_mvref)
+    sf->inter_sf.warp_delta_rdlat_mv_refine = atoi(env_rdlat_mvref);
+  const char *env_rdlat_polish = getenv("WARP_DELTA_RDLAT_POLISH");
+  if (env_rdlat_polish)
+    sf->inter_sf.warp_delta_rdlat_polish = atoi(env_rdlat_polish);
+  sf->inter_sf.warp_delta_rdlat_num_cands =
+      clamp(sf->inter_sf.warp_delta_rdlat_num_cands, 1, 8);
+  sf->inter_sf.warp_delta_rdlat_iters =
+      clamp(sf->inter_sf.warp_delta_rdlat_iters, 1, 4);
 
   if (oxcf->mode == GOOD && cpi->oxcf.enable_low_complexity_decode) {
     // TODO (yunqingwang): LC speed features are added below.

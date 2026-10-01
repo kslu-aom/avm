@@ -188,6 +188,10 @@ struct av2_extracfg {
                                  // 2: grad+refine, -1: auto)
   int warp_delta_grad_step_scale;    // warp delta grad step scale percentage
   int warp_delta_grad_refine_iters;  // warp delta grad refine iters
+  int warp_delta_rdlat_num_cands;    // method 7: verified candidates (-1: sf)
+  int warp_delta_rdlat_iters;        // method 7: GN iterations (-1: sf)
+  int warp_delta_rdlat_mv_refine;    // method 7: MV refine (-1: sf)
+  int warp_delta_rdlat_polish;       // method 7: final polish (-1: sf)
   int enable_intra_dip;     // enable intra DIP (data-driven intra) sequence
   int enable_smooth_intra;  // enable smooth intra modes for sequence
   int enable_paeth_intra;   // enable Paeth intra mode for sequence
@@ -519,6 +523,10 @@ static struct av2_extracfg default_extra_cfg = {
   -1,   // warp_delta_search_method (-1: auto)
   100,  // warp_delta_grad_step_scale (100%)
   0,    // warp_delta_grad_refine_iters (0)
+  -1,   // warp_delta_rdlat_num_cands (-1: speed feature default)
+  -1,   // warp_delta_rdlat_iters (-1: speed feature default)
+  -1,   // warp_delta_rdlat_mv_refine (-1: speed feature default)
+  -1,   // warp_delta_rdlat_polish (-1: speed feature default)
   1,    // enable_intra_dip at sequence level
   1,    // enable smooth intra modes usage for sequence
   1,    // enable Paeth intra mode usage for sequence
@@ -1675,6 +1683,14 @@ static avm_codec_err_t set_encoder_config(AV2EncoderConfig *oxcf,
       extra_cfg->warp_delta_grad_step_scale;
   oxcf->motion_mode_cfg.warp_delta_grad_refine_iters =
       extra_cfg->warp_delta_grad_refine_iters;
+  oxcf->motion_mode_cfg.warp_delta_rdlat_num_cands =
+      extra_cfg->warp_delta_rdlat_num_cands;
+  oxcf->motion_mode_cfg.warp_delta_rdlat_iters =
+      extra_cfg->warp_delta_rdlat_iters;
+  oxcf->motion_mode_cfg.warp_delta_rdlat_mv_refine =
+      extra_cfg->warp_delta_rdlat_mv_refine;
+  oxcf->motion_mode_cfg.warp_delta_rdlat_polish =
+      extra_cfg->warp_delta_rdlat_polish;
 
   // Set partition related configuration.
   part_cfg->disable_ml_partition_speed_features =
@@ -4443,6 +4459,26 @@ static avm_codec_err_t encoder_set_option(avm_codec_alg_priv_t *ctx,
                  &arg, &g_av2_codec_arg_defs.warp_delta_grad_refine_iters, argv,
                  err_string)) {
     extra_cfg.warp_delta_grad_refine_iters =
+        avm_arg_parse_int_helper(&arg, err_string);
+  } else if (avm_arg_match_helper(
+                 &arg, &g_av2_codec_arg_defs.warp_delta_rdlat_num_cands, argv,
+                 err_string)) {
+    extra_cfg.warp_delta_rdlat_num_cands =
+        avm_arg_parse_int_helper(&arg, err_string);
+  } else if (avm_arg_match_helper(&arg,
+                                  &g_av2_codec_arg_defs.warp_delta_rdlat_iters,
+                                  argv, err_string)) {
+    extra_cfg.warp_delta_rdlat_iters =
+        avm_arg_parse_int_helper(&arg, err_string);
+  } else if (avm_arg_match_helper(
+                 &arg, &g_av2_codec_arg_defs.warp_delta_rdlat_mv_refine, argv,
+                 err_string)) {
+    extra_cfg.warp_delta_rdlat_mv_refine =
+        avm_arg_parse_int_helper(&arg, err_string);
+  } else if (avm_arg_match_helper(&arg,
+                                  &g_av2_codec_arg_defs.warp_delta_rdlat_polish,
+                                  argv, err_string)) {
+    extra_cfg.warp_delta_rdlat_polish =
         avm_arg_parse_int_helper(&arg, err_string);
   } else if (avm_arg_match_helper(&arg, &g_av2_codec_arg_defs.enable_intra_dip,
                                   argv, err_string)) {

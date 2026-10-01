@@ -116,6 +116,11 @@ int av2_cost_model_param(const MB_MODE_INFO *mbmi, const ModeCosts *mode_costs,
                          int step_size, int max_coded_index,
                          WarpedMotionParams *base_params);
 
+// Rate (excluding sign) of one warp-delta parameter. `index` is the wmmat
+// index (2..5) and `coded_value` the absolute coded index.
+int av2_cost_warp_delta_param(int index, int coded_value,
+                              const ModeCosts *mode_costs, int max_coded_index);
+
 // TODO(any): The defs below could potentially be moved to rdopt_utils.h instead
 // because they are not the main rdopt functions.
 /*!\cond */

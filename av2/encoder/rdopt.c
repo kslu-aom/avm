@@ -1574,6 +1574,12 @@ static int cost_warp_delta_param(int index, int coded_value,
   return cost;
 }
 
+int av2_cost_warp_delta_param(int index, int coded_value,
+                              const ModeCosts *mode_costs,
+                              int max_coded_index) {
+  return cost_warp_delta_param(index, coded_value, mode_costs, max_coded_index);
+}
+
 // Compute the total cost of the all warp-delta model parameter.
 // Since MVs are signaled separately, the number of model parameters are 4 and 2
 // for six and four parameter models, respectively.

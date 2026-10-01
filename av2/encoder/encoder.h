@@ -620,6 +620,11 @@ typedef struct {
   int warp_delta_search_method;
   int warp_delta_grad_step_scale;
   int warp_delta_grad_refine_iters;
+  // WARP_DELTA_GRADIENT_RDLAT controls (-1: use speed-feature default)
+  int warp_delta_rdlat_num_cands;
+  int warp_delta_rdlat_iters;
+  int warp_delta_rdlat_mv_refine;
+  int warp_delta_rdlat_polish;
 } MotionModeCfg;
 
 typedef struct {

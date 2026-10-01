@@ -4913,8 +4913,8 @@ uint8_t need_mv_adjustment(MACROBLOCKD *xd, const AV2_COMMON *const cm,
   return (last_sign == sum_parity) ? 0 : 1;
 }
 
-#define MAX_WARP_DELTA_ITERS_EXT 9
-#define MAX_WARP_DELTA_ITERS 5
+#define MAX_WARP_DELTA_ITERS_EXT 14
+#define MAX_WARP_DELTA_ITERS 8
 // This function is used to search the translational MV part of the warp model
 // and only invoked when delta parameters are signaled for warp-delta mode.
 static void refine_translational_mv(
@@ -5089,10 +5089,10 @@ void av2_estimate_warp_delta_from_gradients(
       // Central difference for interior pixels, single-sided for borders
       const int gx = (i == 0 || i == bw - 1)
                          ? (pred_row[i_next] - pred_row[i_prev])
-                         : ((pred_row[i + 1] - pred_row[i - 1]) >> 1);
+                         : ((pred_row[i + 1] - pred_row[i - 1]) / 2);
       const int gy = (j == 0 || j == bh - 1)
                          ? (pred_row_next[i] - pred_row_prev[i])
-                         : ((pred_row_next[i] - pred_row_prev[i]) >> 1);
+                         : ((pred_row_next[i] - pred_row_prev[i]) / 2);
       const int e = (int)pred_row[i] - (int)src_row[i];
 
       if (six_param) {
@@ -5499,10 +5499,10 @@ void av2_estimate_warp_delta_from_gradients_2x2(
 
         const int gx = (i == 0 || i == bw - 1)
                            ? (pred_row[i_next] - pred_row[i_prev])
-                           : ((pred_row[i + 1] - pred_row[i - 1]) >> 1);
+                           : ((pred_row[i + 1] - pred_row[i - 1]) / 2);
         const int gy = (j == 0 || j == bh - 1)
                            ? (pred_row_next[i] - pred_row_prev[i])
-                           : ((pred_row_next[i] - pred_row_prev[i]) >> 1);
+                           : ((pred_row_next[i] - pred_row_prev[i]) / 2);
         const int e = (int)pred_row[i] - (int)src_row[i];
 
         const int64_t gxx = (int64_t)gx * dx;
@@ -5605,10 +5605,10 @@ void av2_estimate_warp_delta_from_gradients_2x2(
 
         const int gx = (i == 0 || i == bw - 1)
                            ? (pred_row[i_next] - pred_row[i_prev])
-                           : ((pred_row[i + 1] - pred_row[i - 1]) >> 1);
+                           : ((pred_row[i + 1] - pred_row[i - 1]) / 2);
         const int gy = (j == 0 || j == bh - 1)
                            ? (pred_row_next[i] - pred_row_prev[i])
-                           : ((pred_row_next[i] - pred_row_prev[i]) >> 1);
+                           : ((pred_row_next[i] - pred_row_prev[i]) / 2);
         const int e = (int)pred_row[i] - (int)src_row[i];
 
         const int64_t Jalpha = (int64_t)gx * dx + (int64_t)gy * dy;
@@ -5747,10 +5747,10 @@ void av2_estimate_warp_delta_from_gradients_full(
 
         const int gx = (i == 0 || i == bw - 1)
                            ? (pred_row[i_next] - pred_row[i_prev])
-                           : ((pred_row[i + 1] - pred_row[i - 1]) >> 1);
+                           : ((pred_row[i + 1] - pred_row[i - 1]) / 2);
         const int gy = (j == 0 || j == bh - 1)
                            ? (pred_row_next[i] - pred_row_prev[i])
-                           : ((pred_row_next[i] - pred_row_prev[i]) >> 1);
+                           : ((pred_row_next[i] - pred_row_prev[i]) / 2);
         const int e = (int)pred_row[i] - (int)src_row[i];
 
         const double J[6] = {
@@ -5836,10 +5836,10 @@ void av2_estimate_warp_delta_from_gradients_full(
 
         const int gx = (i == 0 || i == bw - 1)
                            ? (pred_row[i_next] - pred_row[i_prev])
-                           : ((pred_row[i + 1] - pred_row[i - 1]) >> 1);
+                           : ((pred_row[i + 1] - pred_row[i - 1]) / 2);
         const int gy = (j == 0 || j == bh - 1)
                            ? (pred_row_next[i] - pred_row_prev[i])
-                           : ((pred_row_next[i] - pred_row_prev[i]) >> 1);
+                           : ((pred_row_next[i] - pred_row_prev[i]) / 2);
         const int e = (int)pred_row[i] - (int)src_row[i];
 
         const double J[4] = { (double)gx, (double)gy,
@@ -6531,6 +6531,504 @@ int av2_pick_warp_delta_gradient_joint_full(
   return 1;
 }
 
+// -----------------------------------------------------------------------------
+// WARP_DELTA_GRADIENT_RDLAT: gradient quadratic model + RD-regularized lattice
+// search.
+//
+// Around the current model, the DC-removed prediction error (the variance
+// measured by compute_motion_cost()) is approximated to second order in the
+// coded warp-delta indices d of the non-translational parameters:
+//   err(d) ~= err(0) - 2 * g' * d + d' * H * d,
+// where H and g are the Gauss-Newton normal equations built from the gradients
+// of the current prediction. Instead of rounding a least-squares solution per
+// parameter, the lattice points are ranked by the predicted RD cost
+//   q(d) = d' * H * d - 2 * g' * d + lambda * R(d),
+// with R(d) the actual rate of the coded indices, and the best few are verified
+// with a real warped prediction.
+// -----------------------------------------------------------------------------
+#define WARP_RDLAT_MAX_PARAMS 4
+#define WARP_RDLAT_MAX_CANDS 8
+// Largest max_coded_index returned by get_warp_model_steps().
+#define WARP_RDLAT_MAX_CODED_INDEX 14
+#define WARP_RDLAT_RATE_TAB_SIZE (2 * WARP_RDLAT_MAX_CODED_INDEX + 1)
+
+typedef struct {
+  int d[WARP_RDLAT_MAX_PARAMS];  // Lattice offset, in coded index units
+  double q;                      // Predicted RD cost
+} WarpRdlatCand;
+
+typedef struct {
+  const AV2_COMMON *cm;
+  MACROBLOCKD *xd;
+  MB_MODE_INFO *mbmi;
+  const SUBPEL_MOTION_SEARCH_PARAMS *ms_params;
+  const ModeCosts *mode_costs;
+  const struct scale_factors *sf;
+  WarpedMotionParams *base_params;
+  int step_size;
+  int max_coded_index;
+  int warp_precision_idx_rate;
+  int error_per_bit;
+  int rd_shift;
+  bool can_refine_mv;
+} WarpRdlatCtx;
+
+// Builds the quadratic model (H, g) of the DC-removed prediction error with
+// respect to the coded warp-delta indices (in units of step_size) of the 2
+// (ROTZOOM) or 4 (AFFINE) non-translational parameters, linearized around the
+// prediction `pred`. The translational part of the model is kept fixed. The
+// model is expressed in the 8-bit-equivalent error units of the highbd variance
+// functions used by compute_motion_cost().
+static void warp_rdlat_build_model(
+    const uint16_t *src, int src_stride, const uint16_t *pred, int pred_stride,
+    int bw, int bh, int six_param, int step_size, int bd,
+    double H[WARP_RDLAT_MAX_PARAMS][WARP_RDLAT_MAX_PARAMS],
+    double g[WARP_RDLAT_MAX_PARAMS]) {
+  const int n = six_param ? 4 : 2;
+  const int center_x = bw / 2 - 1;
+  const int center_y = bh / 2 - 1;
+  // The gradients are scaled by 2 so that central differences are integers.
+  // With e = pred - src and J the (scaled) Jacobian, accumulate
+  //   A = sum(J * J'), b = -sum(e * J), s = sum(J), e_sum = sum(e).
+  int64_t A[WARP_RDLAT_MAX_PARAMS][WARP_RDLAT_MAX_PARAMS] = { { 0 } };
+  int64_t b[WARP_RDLAT_MAX_PARAMS] = { 0 };
+  int64_t s[WARP_RDLAT_MAX_PARAMS] = { 0 };
+  int64_t e_sum = 0;
+
+  for (int j = 0; j < bh; j++) {
+    const int dy = j - center_y;
+    const uint16_t *pred_row = &pred[j * pred_stride];
+    const uint16_t *pred_row_prev = &pred[AVMMAX(0, j - 1) * pred_stride];
+    const uint16_t *pred_row_next = &pred[AVMMIN(bh - 1, j + 1) * pred_stride];
+    const uint16_t *src_row = &src[j * src_stride];
+    // One-sided differences at the block border are scaled by 2.
+    const int gy_mul = (j == 0 || j == bh - 1) ? 2 : 1;
+
+    for (int i = 0; i < bw; i++) {
+      const int dx = i - center_x;
+      const int i_prev = AVMMAX(0, i - 1);
+      const int i_next = AVMMIN(bw - 1, i + 1);
+      const int gx_mul = (i == 0 || i == bw - 1) ? 2 : 1;
+      const int gx = gx_mul * (pred_row[i_next] - pred_row[i_prev]);
+      const int gy = gy_mul * (pred_row_next[i] - pred_row_prev[i]);
+      const int e = (int)pred_row[i] - (int)src_row[i];
+
+      int J[WARP_RDLAT_MAX_PARAMS];
+      if (six_param) {
+        J[0] = gx * dx;
+        J[1] = gx * dy;
+        J[2] = gy * dx;
+        J[3] = gy * dy;
+      } else {
+        J[0] = gx * dx + gy * dy;
+        J[1] = gx * dy - gy * dx;
+      }
+      for (int r = 0; r < n; r++) {
+        for (int c = r; c < n; c++) A[r][c] += (int64_t)J[r] * J[c];
+        b[r] -= (int64_t)e * J[r];
+        s[r] += J[r];
+      }
+      e_sum += e;
+    }
+  }
+
+  // Eliminate the DC offset of the error (the variance is invariant to it)
+  // with the Schur complement, undo the gradient scaling, and convert from real
+  // parameter units to coded index units.
+  const double num_pels = (double)(bw * bh);
+  const double unit = (double)step_size / (double)(1 << WARPEDMODEL_PREC_BITS);
+  const double bd_scale = 1.0 / (double)(1 << (2 * (bd - 8)));
+  const double h_scale = 0.25 * unit * unit * bd_scale;
+  const double g_scale = 0.5 * unit * bd_scale;
+  for (int r = 0; r < n; r++) {
+    for (int c = r; c < n; c++) {
+      H[r][c] = H[c][r] =
+          ((double)A[r][c] - (double)s[r] * (double)s[c] / num_pels) * h_scale;
+    }
+    g[r] = ((double)b[r] + (double)s[r] * (double)e_sum / num_pels) * g_scale;
+  }
+}
+
+// Fills rate_tab[r][v + max_coded_index] with the rate (including the sign) of
+// coding the index v for the r-th non-translational warp parameter.
+static void warp_rdlat_init_rate_tab(
+    const ModeCosts *mode_costs, int n, int max_coded_index,
+    int rate_tab[WARP_RDLAT_MAX_PARAMS][WARP_RDLAT_RATE_TAB_SIZE]) {
+  for (int r = 0; r < n; r++) {
+    for (int v = -max_coded_index; v <= max_coded_index; v++) {
+      int cost =
+          av2_cost_warp_delta_param(2 + r, abs(v), mode_costs, max_coded_index);
+      if (v) cost += mode_costs->warp_param_sign_cost[v < 0];
+      rate_tab[r][v + max_coded_index] = cost;
+    }
+  }
+}
+
+// Predicted RD cost of moving the coded indices from st0 to st0 + d.
+static double warp_rdlat_cost(
+    const double H[WARP_RDLAT_MAX_PARAMS][WARP_RDLAT_MAX_PARAMS],
+    const double g[WARP_RDLAT_MAX_PARAMS], const int *d, int n,
+    const int rate_tab[WARP_RDLAT_MAX_PARAMS][WARP_RDLAT_RATE_TAB_SIZE],
+    const int *st0, int max_coded_index, double lambda) {
+  double dist = 0;
+  int rate = 0;
+  for (int r = 0; r < n; r++) {
+    double hd = 0;
+    for (int c = 0; c < n; c++) hd += H[r][c] * d[c];
+    dist += d[r] * (hd - 2.0 * g[r]);
+    rate += rate_tab[r][st0[r] + d[r] + max_coded_index];
+  }
+  return dist + lambda * rate;
+}
+
+// Inserts the lattice offset d with predicted cost q into `cands`, which is
+// kept sorted by increasing q and holds at most max_cands entries.
+static void warp_rdlat_insert_cand(WarpRdlatCand *cands, int max_cands,
+                                   int *num_cands, const int *d, int n,
+                                   double q) {
+  if (*num_cands == max_cands && q >= cands[max_cands - 1].q) return;
+  for (int k = 0; k < *num_cands; k++) {
+    int same = 1;
+    for (int r = 0; r < n; r++) same &= (cands[k].d[r] == d[r]);
+    if (same) return;
+  }
+  int pos = *num_cands;
+  if (pos == max_cands) {
+    pos--;  // Replace the worst candidate
+  } else {
+    (*num_cands)++;
+  }
+  while (pos > 0 && cands[pos - 1].q > q) {
+    cands[pos] = cands[pos - 1];
+    pos--;
+  }
+  for (int r = 0; r < WARP_RDLAT_MAX_PARAMS; r++)
+    cands[pos].d[r] = r < n ? d[r] : 0;
+  cands[pos].q = q;
+}
+
+// Completes the warp model in mbmi->wm_params[0], whose non-translational
+// parameters have been set, renders its prediction, and returns its RD cost.
+// Returns UINT64_MAX if the model is not valid.
+static uint64_t warp_rdlat_eval_model(const WarpRdlatCtx *ctx,
+                                      const MV *center_mv) {
+  MB_MODE_INFO *mbmi = ctx->mbmi;
+  MACROBLOCKD *xd = ctx->xd;
+  WarpedMotionParams *params = &mbmi->wm_params[0];
+  const BLOCK_SIZE bsize = mbmi->sb_type[PLANE_TYPE_Y];
+  if (!mbmi->six_param_warp_model_flag) {
+    params->wmmat[4] = -params->wmmat[3];
+    params->wmmat[5] = params->wmmat[2];
+  }
+  const int valid = av2_is_warp_model_reduced(params);
+  av2_get_shear_params(params, ctx->sf);
+  if (!valid) return UINT64_MAX;
+
+  av2_set_warp_translation(xd->mi_row, xd->mi_col, bsize, *center_mv, params);
+  const int rate = ctx->warp_precision_idx_rate +
+                   av2_cost_model_param(mbmi, ctx->mode_costs, ctx->step_size,
+                                        ctx->max_coded_index, ctx->base_params);
+  const unsigned int sse =
+      compute_motion_cost(xd, ctx->cm, ctx->ms_params, bsize,
+                          &mbmi->mv[0].as_mv, ctx->can_refine_mv);
+  return (uint64_t)sse + (uint64_t)ROUND_POWER_OF_TWO_64(
+                             (int64_t)rate * ctx->error_per_bit, ctx->rd_shift);
+}
+
+// Warp delta search with the gradient quadratic model and the RD-regularized
+// lattice search described above (WARP_DELTA_GRADIENT_RDLAT). Each iteration
+// builds the model around the best model so far, verifies the best lattice
+// candidates, and refines the translational MV (WARP_NEWMV). Returns 1.
+static int pick_warp_delta_rdlat(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
+                                 MB_MODE_INFO *mbmi,
+                                 const SUBPEL_MOTION_SEARCH_PARAMS *ms_params,
+                                 const ModeCosts *mode_costs,
+                                 warp_mode_info_array *prev_best_models,
+                                 WARP_CANDIDATE *warp_param_stack) {
+  const AV2_COMMON *const cm = &cpi->common;
+  const INTER_MODE_SPEED_FEATURES *const inter_sf = &cpi->sf.inter_sf;
+  const int max_cands =
+      clamp(inter_sf->warp_delta_rdlat_num_cands, 1, WARP_RDLAT_MAX_CANDS);
+  const int num_iters = AVMMAX(1, inter_sf->warp_delta_rdlat_iters);
+  WarpedMotionParams *params = &mbmi->wm_params[0];
+  const BLOCK_SIZE bsize = mbmi->sb_type[PLANE_TYPE_Y];
+  const int bw = block_size_wide[bsize];
+  const int bh = block_size_high[bsize];
+  const int six_param = mbmi->six_param_warp_model_flag;
+  const int n = six_param ? 4 : 2;
+
+  const struct scale_factors *sf =
+      get_ref_scale_factors_const(cm, mbmi->ref_frame[0]);
+
+  bool skip_mv_search = 0;
+  const int enable_fast_model_search =
+      prev_best_models && mbmi->warp_precision_idx;
+  const bool can_refine_mv = (mbmi->mode == WARP_NEWMV);
+  const SubpelMvLimits *mv_limits = &ms_params->mv_limits;
+
+  WarpedMotionParams base_params;
+  // See av2_pick_warp_delta() for the roles of center_mv and best_mv.
+  int_mv center_mv;
+  av2_get_warp_base_params(cm, mbmi, &base_params, &center_mv,
+                           warp_param_stack);
+  MV *best_mv = &mbmi->mv[0].as_mv;
+
+  int step_size = 0;
+  int max_coded_index = 0;
+  get_warp_model_steps(mbmi, &step_size, &max_coded_index);
+  assert(max_coded_index <= WARP_RDLAT_MAX_CODED_INDEX);
+  const int max_warp_delta_value = step_size * max_coded_index;
+  WarpedMotionParams start_params = base_params;
+
+  // Warm start from the model selected at the previous warp precision, as in
+  // the step search.
+  if (enable_fast_model_search) {
+    warp_mode_info cand_best_model;
+    if (get_valid_model_from_warp_stats_buffer(prev_best_models, mbmi,
+                                               &cand_best_model) &&
+        cand_best_model.is_valid) {
+      WarpedMotionParams prev_wm_params = cand_best_model.prev_wm_params;
+      for (int param_index = 2; param_index < 2 + n; param_index++) {
+        const int actual_delta =
+            prev_wm_params.wmmat[param_index] - base_params.wmmat[param_index];
+        int truncated_delta =
+            ((abs(actual_delta) + (step_size >> 1)) / step_size) * step_size;
+        if (truncated_delta > max_warp_delta_value)
+          truncated_delta = max_warp_delta_value;
+        prev_wm_params.wmmat[param_index] =
+            base_params.wmmat[param_index] +
+            (actual_delta < 0 ? -truncated_delta : truncated_delta);
+      }
+      if (!six_param) {
+        prev_wm_params.wmmat[4] = -prev_wm_params.wmmat[3];
+        prev_wm_params.wmmat[5] = prev_wm_params.wmmat[2];
+      }
+      start_params = prev_wm_params;
+
+      if (can_refine_mv) {
+        int_mv first_pass_start_mv = cand_best_model.mbmi_stats.mv[0];
+        if (mbmi->pb_mv_precision < MV_PRECISION_HALF_PEL)
+          lower_mv_precision(&first_pass_start_mv.as_mv, mbmi->pb_mv_precision);
+        if (av2_is_subpelmv_in_range(mv_limits, first_pass_start_mv.as_mv)) {
+          mbmi->mv[0] = first_pass_start_mv;
+          center_mv = first_pass_start_mv;
+          skip_mv_search = 1;  // Don't search MV if MV is already found
+        }
+      }
+    }
+  }
+
+  // Set up the initial model.
+  params->wmtype = six_param ? AFFINE : ROTZOOM;
+  params->wmmat[2] = start_params.wmmat[2];
+  params->wmmat[3] = start_params.wmmat[3];
+  if (six_param) {
+    params->wmmat[4] = start_params.wmmat[4];
+    params->wmmat[5] = start_params.wmmat[5];
+  } else {
+    params->wmmat[4] = -params->wmmat[3];
+    params->wmmat[5] = params->wmmat[2];
+  }
+  av2_reduce_warp_model(params);
+  av2_get_shear_params(params, sf);
+  params->invalid = 0;
+
+  const int warp_precision_idx_rate =
+      mode_costs
+          ->warp_precision_idx_cost[mbmi->sb_type[xd->tree_type == CHROMA_PART]]
+                                   [mbmi->warp_precision_idx];
+  const int error_per_bit = ms_params->mv_cost_params.mv_costs->errorperbit;
+  const int rd_shift = RDDIV_BITS + AV2_PROB_COST_SHIFT - RD_EPB_SHIFT +
+                       PIXEL_TRANSFORM_ERROR_SCALE;
+  // Lagrange multiplier of the rate, in the units of compute_motion_cost().
+  const double lambda = (double)error_per_bit / (double)(1 << rd_shift);
+
+  const WarpRdlatCtx ctx = { cm,
+                             xd,
+                             mbmi,
+                             ms_params,
+                             mode_costs,
+                             sf,
+                             &base_params,
+                             step_size,
+                             max_coded_index,
+                             warp_precision_idx_rate,
+                             error_per_bit,
+                             rd_shift,
+                             can_refine_mv };
+
+  int rate_tab[WARP_RDLAT_MAX_PARAMS][WARP_RDLAT_RATE_TAB_SIZE];
+  warp_rdlat_init_rate_tab(mode_costs, n, max_coded_index, rate_tab);
+
+  // Calculate the initial RD cost. This also renders the prediction around
+  // which the first quadratic model is built.
+  av2_set_warp_translation(xd->mi_row, xd->mi_col, bsize, center_mv.as_mv,
+                           params);
+  WarpedMotionParams best_wm_params = *params;
+  const int rate = warp_precision_idx_rate +
+                   av2_cost_model_param(mbmi, mode_costs, step_size,
+                                        max_coded_index, &base_params);
+  const unsigned int sse =
+      compute_motion_cost(xd, cm, ms_params, bsize, best_mv, can_refine_mv);
+  uint64_t best_rd =
+      (uint64_t)sse +
+      (uint64_t)ROUND_POWER_OF_TWO_64((int64_t)rate * error_per_bit, rd_shift);
+
+  const uint16_t *src = ms_params->var_params.ms_buffers.src->buf;
+  const int src_stride = ms_params->var_params.ms_buffers.src->stride;
+  const uint16_t *pred = xd->plane[0].dst.buf;
+  const int pred_stride = xd->plane[0].dst.stride;
+  const int do_mv_refine =
+      inter_sf->warp_delta_rdlat_mv_refine && can_refine_mv && !skip_mv_search;
+
+  for (int iter = 0; iter < num_iters; iter++) {
+    // Here xd->plane[0].dst holds the prediction of best_wm_params.
+    double H[WARP_RDLAT_MAX_PARAMS][WARP_RDLAT_MAX_PARAMS];
+    double g[WARP_RDLAT_MAX_PARAMS];
+    warp_rdlat_build_model(src, src_stride, pred, pred_stride, bw, bh,
+                           six_param, step_size, xd->bd, H, g);
+
+    // Current coded indices, and the range of valid lattice offsets.
+    int st0[WARP_RDLAT_MAX_PARAMS] = { 0 };
+    int lo[WARP_RDLAT_MAX_PARAMS] = { 0 };
+    int hi[WARP_RDLAT_MAX_PARAMS] = { 0 };
+    for (int r = 0; r < n; r++) {
+      st0[r] =
+          (best_wm_params.wmmat[2 + r] - base_params.wmmat[2 + r]) / step_size;
+      lo[r] = -max_coded_index - st0[r];
+      hi[r] = max_coded_index - st0[r];
+    }
+    static const int kZero[WARP_RDLAT_MAX_PARAMS] = { 0 };
+    const double q0 =
+        warp_rdlat_cost(H, g, kZero, n, rate_tab, st0, max_coded_index, lambda);
+
+    // Collect the lattice points with the lowest predicted RD cost, among the
+    // ones predicted to improve on the current model.
+    WarpRdlatCand cands[WARP_RDLAT_MAX_CANDS];
+    int num_cands = 0;
+    if (!six_param) {
+      // ROTZOOM: exhaustive search of the 2-D lattice.
+      int d[WARP_RDLAT_MAX_PARAMS] = { 0 };
+      for (d[0] = lo[0]; d[0] <= hi[0]; d[0]++) {
+        for (d[1] = lo[1]; d[1] <= hi[1]; d[1]++) {
+          if (!d[0] && !d[1]) continue;
+          const double q = warp_rdlat_cost(H, g, d, n, rate_tab, st0,
+                                           max_coded_index, lambda);
+          if (q < q0)
+            warp_rdlat_insert_cand(cands, max_cands, &num_cands, d, n, q);
+        }
+      }
+    } else {
+      // AFFINE: search the +/-1 boxes around the rounded full, half, and zero
+      // least-squares steps.
+      double Hs[6][6], bs[6], xs[6] = { 0 };
+      for (int r = 0; r < n; r++) {
+        for (int c = 0; c < n; c++) Hs[r][c] = H[r][c];
+        Hs[r][r] += 1e-6 * (1.0 + H[r][r]);
+        bs[r] = g[r];
+      }
+      if (!solve_linear_system_6(Hs, bs, xs, n)) {
+        for (int r = 0; r < n; r++) xs[r] = 0;
+      }
+      static const double kStepScale[3] = { 1.0, 0.5, 0.0 };
+      for (int t = 0; t < 3; t++) {
+        int c0[WARP_RDLAT_MAX_PARAMS];
+        for (int r = 0; r < n; r++) {
+          c0[r] = (int)lround(fclamp(xs[r] * kStepScale[t], lo[r], hi[r]));
+        }
+        int o[WARP_RDLAT_MAX_PARAMS];
+        for (o[0] = -1; o[0] <= 1; o[0]++) {
+          for (o[1] = -1; o[1] <= 1; o[1]++) {
+            for (o[2] = -1; o[2] <= 1; o[2]++) {
+              for (o[3] = -1; o[3] <= 1; o[3]++) {
+                int d[WARP_RDLAT_MAX_PARAMS];
+                int in_range = 1, nonzero = 0;
+                for (int r = 0; r < n; r++) {
+                  d[r] = c0[r] + o[r];
+                  in_range &= (d[r] >= lo[r] && d[r] <= hi[r]);
+                  nonzero |= d[r];
+                }
+                if (!in_range || !nonzero) continue;
+                const double q = warp_rdlat_cost(H, g, d, n, rate_tab, st0,
+                                                 max_coded_index, lambda);
+                if (q < q0)
+                  warp_rdlat_insert_cand(cands, max_cands, &num_cands, d, n, q);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Verify the candidates with real predictions.
+    int improved = 0;
+    const WarpedMotionParams center_params = best_wm_params;
+    for (int k = 0; k < num_cands; k++) {
+      *params = center_params;
+      for (int r = 0; r < n; r++)
+        params->wmmat[2 + r] += cands[k].d[r] * step_size;
+      const uint64_t cand_rd = warp_rdlat_eval_model(&ctx, &center_mv.as_mv);
+      if (cand_rd < best_rd) {
+        best_wm_params = *params;
+        best_rd = cand_rd;
+        improved = 1;
+      }
+    }
+
+    // Refine the translational MV for the updated warp parameters.
+    if (do_mv_refine) {
+      const MV prev_mv = *best_mv;
+      *params = best_wm_params;
+      refine_translational_mv(cm, xd, ms_params, mbmi, params, &base_params,
+                              &best_wm_params, best_mv, warp_precision_idx_rate,
+                              mode_costs, step_size, max_coded_index, 8, 1,
+                              &best_rd);
+      center_mv.as_mv = *best_mv;
+      if (best_mv->row != prev_mv.row || best_mv->col != prev_mv.col)
+        improved = 1;
+    }
+
+    if (!improved) break;
+    if (iter + 1 < num_iters) {
+      // Re-render the best model so that the next quadratic model is built
+      // around it.
+      *params = best_wm_params;
+      compute_motion_cost(xd, cm, ms_params, bsize, best_mv, can_refine_mv);
+    }
+  }
+
+  // Optional final +/-1 coordinate polish.
+  if (inter_sf->warp_delta_rdlat_polish) {
+    for (int param_index = 2; param_index < 2 + n; param_index++) {
+      const WarpedMotionParams center_params = best_wm_params;
+      for (int dir = -1; dir <= 1; dir += 2) {
+        *params = center_params;
+        params->wmmat[param_index] += dir * step_size;
+        if (abs(params->wmmat[param_index] - base_params.wmmat[param_index]) >
+            max_warp_delta_value)
+          continue;
+        const uint64_t cand_rd = warp_rdlat_eval_model(&ctx, &center_mv.as_mv);
+        if (cand_rd < best_rd) {
+          best_wm_params = *params;
+          best_rd = cand_rd;
+        }
+      }
+    }
+  }
+
+  if (prev_best_models) {
+    warp_mode_info this_warp_stats;
+    this_warp_stats.is_valid = 1;
+    this_warp_stats.step_size = step_size;
+    this_warp_stats.prev_wm_params = best_wm_params;
+    this_warp_stats.mbmi_stats = *mbmi;
+    update_warp_stats_buffer(&this_warp_stats, prev_best_models);
+  }
+
+  mbmi->wm_params[0] = best_wm_params;
+  return 1;
+}
+
 // Returns 1 if able to select a good model, 0 if not
 // TODO(rachelbarker):
 // This function cannot use the same neighbor pruning used in the other warp
@@ -6544,6 +7042,11 @@ int av2_pick_warp_delta(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
                         warp_mode_info_array *prev_best_models,
                         WARP_CANDIDATE *warp_param_stack,
                         int eval_motion_mode) {
+  if (cpi->sf.inter_sf.warp_delta_search_method == WARP_DELTA_GRADIENT_RDLAT) {
+    (void)eval_motion_mode;
+    return pick_warp_delta_rdlat(cpi, xd, mbmi, ms_params, mode_costs,
+                                 prev_best_models, warp_param_stack);
+  }
   if (cpi->sf.inter_sf.warp_delta_search_method >=
       WARP_DELTA_GRADIENT_JOINT_FULL) {
     return av2_pick_warp_delta_gradient_joint_full(

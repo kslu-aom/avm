@@ -201,6 +201,10 @@ typedef struct av2_codec_arg_definitions {
   arg_def_t warp_delta_search_method;
   arg_def_t warp_delta_grad_step_scale;
   arg_def_t warp_delta_grad_refine_iters;
+  arg_def_t warp_delta_rdlat_num_cands;
+  arg_def_t warp_delta_rdlat_iters;
+  arg_def_t warp_delta_rdlat_mv_refine;
+  arg_def_t warp_delta_rdlat_polish;
   arg_def_t enable_intra_dip;
   arg_def_t enable_smooth_intra;
   arg_def_t enable_paeth_intra;

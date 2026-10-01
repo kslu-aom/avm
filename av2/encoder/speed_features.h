@@ -61,15 +61,16 @@ typedef enum {
       1,  // Fast 1x1 decoupled gradient direct parameter estimation
   WARP_DELTA_GRADIENT_PLUS_REFINE =
       2,  // 1x1 decoupled gradient estimation + 1-pass local polish
-  WARP_DELTA_GRADIENT_JOINT_2X2 =
-      3,  // 2x2 coupled joint solve + translational MV refine
+  WARP_DELTA_GRADIENT_JOINT_2X2 = 3,  // 2x2 coupled joint solve
   WARP_DELTA_GRADIENT_JOINT_2X2_PLUS_REFINE =
-      4,  // 2x2 coupled joint solve + 1-pass polish + translational MV refine
+      4,  // 2x2 coupled joint solve + directional polish
   WARP_DELTA_GRADIENT_JOINT_FULL =
-      5,  // Full 4/6-parameter coupled joint solve + translational MV refine
+      5,  // Full 4/6-parameter (+translation) coupled joint solve
   WARP_DELTA_GRADIENT_JOINT_FULL_PLUS_REFINE =
-      6,  // Full 4/6-parameter coupled joint solve + 1-pass polish +
-          // translational MV refine
+      6,  // Full 4/6-parameter coupled joint solve + directional polish
+  WARP_DELTA_GRADIENT_RDLAT =
+      7,  // Gradient quadratic model + RD-regularized lattice search with
+          // top-K verification + translational MV refine (WARP_NEWMV)
 } WARP_DELTA_SEARCH_METHOD;
 
 /* This enumeration defines when the rate control recode loop will be
@@ -712,21 +713,28 @@ typedef struct INTER_MODE_SPEED_FEATURES {
   // Prune/disable WARP_DELTA search specifically in WARP_NEWMV mode.
   int prune_warp_delta_in_warp_newmv;
 
-  // Search method for WARP_DELTA parameters:
-  // 0 : Standard coordinate descent (plus/minus search)
-  // 1 : Fast gradient-based direct parameter estimation
-  // 2 : Gradient-based estimation + 1-pass local polish
+  // Search method for WARP_DELTA parameters (see WARP_DELTA_SEARCH_METHOD).
   WARP_DELTA_SEARCH_METHOD warp_delta_search_method;
 
   // Scaling factor for gradient step size in percentage (default: 100).
+  // Used by methods 1-6 only.
   int warp_delta_grad_step_scale;
 
   // Number of local refinement passes around gradient estimate (0: direct only,
-  // 1: 1-pass polish).
+  // 1: 1-pass polish). Used by methods 1-6 only.
   int warp_delta_grad_refine_iters;
 
-  // Prune warp delta search at precision 1 if precision 0 chose zero delta.
-  int prune_warp_delta_precision_search;
+  // WARP_DELTA_GRADIENT_RDLAT (method 7) controls:
+  // Number of lattice candidates (ranked by the predicted RD cost) that are
+  // verified with a real warped prediction per Gauss-Newton iteration.
+  int warp_delta_rdlat_num_cands;
+  // Number of Gauss-Newton iterations (re-linearization around the best
+  // verified model).
+  int warp_delta_rdlat_iters;
+  // Refine the translational MV of WARP_NEWMV after the warp update.
+  int warp_delta_rdlat_mv_refine;
+  // Run a final +/-1 coordinate polish pass on the selected model.
+  int warp_delta_rdlat_polish;
 
   // Skip extended compound mode when ref frame corresponding to NEWMV does not
   // have NEWMV as single mode winner.
