@@ -6573,6 +6573,64 @@ typedef struct {
   bool can_refine_mv;
 } WarpRdlatCtx;
 
+// Accumulates one pixel into the normal equations. gx and gy are the 2x-scaled
+// gradients of the prediction and e = pred - src. `n` is a compile-time
+// constant at every call site, so the loops unroll.
+static INLINE void warp_rdlat_accum_pel(
+    int n, int gx, int gy, int dx, int dy, int e,
+    int64_t A[WARP_RDLAT_MAX_PARAMS][WARP_RDLAT_MAX_PARAMS], int64_t *b,
+    int64_t *s) {
+  int J[WARP_RDLAT_MAX_PARAMS];
+  if (n == 4) {
+    J[0] = gx * dx;
+    J[1] = gx * dy;
+    J[2] = gy * dx;
+    J[3] = gy * dy;
+  } else {
+    J[0] = gx * dx + gy * dy;
+    J[1] = gx * dy - gy * dx;
+  }
+  for (int r = 0; r < n; r++) {
+    for (int c = r; c < n; c++) A[r][c] += (int64_t)J[r] * J[c];
+    b[r] -= (int64_t)e * J[r];
+    s[r] += J[r];
+  }
+}
+
+// Accumulates one row of the block. The first and last pixel use one-sided
+// horizontal differences scaled by 2; the interior uses central differences.
+static INLINE void warp_rdlat_accum_row(
+    int n, const uint16_t *pred_row, const uint16_t *pred_row_prev,
+    const uint16_t *pred_row_next, const uint16_t *src_row, int bw, int dy,
+    int center_x, int gy_mul,
+    int64_t A[WARP_RDLAT_MAX_PARAMS][WARP_RDLAT_MAX_PARAMS], int64_t *b,
+    int64_t *s, int64_t *e_sum) {
+  int64_t row_e_sum = 0;
+  {
+    const int gx = 2 * (pred_row[1] - pred_row[0]);
+    const int gy = gy_mul * (pred_row_next[0] - pred_row_prev[0]);
+    const int e = (int)pred_row[0] - (int)src_row[0];
+    warp_rdlat_accum_pel(n, gx, gy, -center_x, dy, e, A, b, s);
+    row_e_sum += e;
+  }
+  for (int i = 1; i < bw - 1; i++) {
+    const int gx = pred_row[i + 1] - pred_row[i - 1];
+    const int gy = gy_mul * (pred_row_next[i] - pred_row_prev[i]);
+    const int e = (int)pred_row[i] - (int)src_row[i];
+    warp_rdlat_accum_pel(n, gx, gy, i - center_x, dy, e, A, b, s);
+    row_e_sum += e;
+  }
+  {
+    const int i = bw - 1;
+    const int gx = 2 * (pred_row[i] - pred_row[i - 1]);
+    const int gy = gy_mul * (pred_row_next[i] - pred_row_prev[i]);
+    const int e = (int)pred_row[i] - (int)src_row[i];
+    warp_rdlat_accum_pel(n, gx, gy, i - center_x, dy, e, A, b, s);
+    row_e_sum += e;
+  }
+  *e_sum += row_e_sum;
+}
+
 // Builds the quadratic model (H, g) of the DC-removed prediction error with
 // respect to the coded warp-delta indices (in units of step_size) of the 2
 // (ROTZOOM) or 4 (AFFINE) non-translational parameters, linearized around the
@@ -6603,32 +6661,12 @@ static void warp_rdlat_build_model(
     const uint16_t *src_row = &src[j * src_stride];
     // One-sided differences at the block border are scaled by 2.
     const int gy_mul = (j == 0 || j == bh - 1) ? 2 : 1;
-
-    for (int i = 0; i < bw; i++) {
-      const int dx = i - center_x;
-      const int i_prev = AVMMAX(0, i - 1);
-      const int i_next = AVMMIN(bw - 1, i + 1);
-      const int gx_mul = (i == 0 || i == bw - 1) ? 2 : 1;
-      const int gx = gx_mul * (pred_row[i_next] - pred_row[i_prev]);
-      const int gy = gy_mul * (pred_row_next[i] - pred_row_prev[i]);
-      const int e = (int)pred_row[i] - (int)src_row[i];
-
-      int J[WARP_RDLAT_MAX_PARAMS];
-      if (six_param) {
-        J[0] = gx * dx;
-        J[1] = gx * dy;
-        J[2] = gy * dx;
-        J[3] = gy * dy;
-      } else {
-        J[0] = gx * dx + gy * dy;
-        J[1] = gx * dy - gy * dx;
-      }
-      for (int r = 0; r < n; r++) {
-        for (int c = r; c < n; c++) A[r][c] += (int64_t)J[r] * J[c];
-        b[r] -= (int64_t)e * J[r];
-        s[r] += J[r];
-      }
-      e_sum += e;
+    if (six_param) {
+      warp_rdlat_accum_row(4, pred_row, pred_row_prev, pred_row_next, src_row,
+                           bw, dy, center_x, gy_mul, A, b, s, &e_sum);
+    } else {
+      warp_rdlat_accum_row(2, pred_row, pred_row_prev, pred_row_next, src_row,
+                           bw, dy, center_x, gy_mul, A, b, s, &e_sum);
     }
   }
 
@@ -6960,18 +6998,24 @@ static int pick_warp_delta_rdlat(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
       }
     }
 
-    // Verify the candidates with real predictions.
+    // Verify the candidates with real predictions. dst_is_best tracks whether
+    // xd->plane[0].dst still holds the prediction of best_wm_params.
     int improved = 0;
+    int dst_is_best = 1;
     const WarpedMotionParams center_params = best_wm_params;
     for (int k = 0; k < num_cands; k++) {
       *params = center_params;
       for (int r = 0; r < n; r++)
         params->wmmat[2 + r] += cands[k].d[r] * step_size;
       const uint64_t cand_rd = warp_rdlat_eval_model(&ctx, &center_mv.as_mv);
+      if (cand_rd == UINT64_MAX) continue;  // Invalid model, nothing rendered
       if (cand_rd < best_rd) {
         best_wm_params = *params;
         best_rd = cand_rd;
         improved = 1;
+        dst_is_best = 1;
+      } else {
+        dst_is_best = 0;
       }
     }
 
@@ -6986,10 +7030,11 @@ static int pick_warp_delta_rdlat(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
       center_mv.as_mv = *best_mv;
       if (best_mv->row != prev_mv.row || best_mv->col != prev_mv.col)
         improved = 1;
+      dst_is_best = 0;
     }
 
     if (!improved) break;
-    if (iter + 1 < num_iters) {
+    if (iter + 1 < num_iters && !dst_is_best) {
       // Re-render the best model so that the next quadratic model is built
       // around it.
       *params = best_wm_params;
