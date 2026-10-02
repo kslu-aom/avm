@@ -184,14 +184,15 @@ struct av2_extracfg {
                                     // for sequence
   int enable_warp_extend;           // enable warp extension for sequence
   int enable_warp_newmv_delta;      // enable warp delta in WARP_NEWMV mode
-  int warp_delta_search_method;  // warp delta search method (0: step, 1: grad,
-                                 // 2: grad+refine, -1: auto)
+  int warp_delta_search_method;     // warp delta search method (0: step,
+                                    // 1: grad 1x1, 2: grad joint 2x2,
+                                    // 3: grad RD-lattice, -1: auto)
   int warp_delta_grad_step_scale;    // warp delta grad step scale percentage
   int warp_delta_grad_refine_iters;  // warp delta grad refine iters
-  int warp_delta_rdlat_num_cands;    // method 7: verified candidates (-1: sf)
-  int warp_delta_rdlat_iters;        // method 7: GN iterations (-1: sf)
-  int warp_delta_rdlat_mv_refine;    // method 7: MV refine (-1: sf)
-  int warp_delta_rdlat_polish;       // method 7: final polish (-1: sf)
+  int warp_delta_rdlat_num_cands;    // method 3: verified candidates (-1: sf)
+  int warp_delta_rdlat_iters;        // method 3: GN iterations (-1: sf)
+  int warp_delta_rdlat_mv_refine;    // method 3: MV refine (-1: sf)
+  int warp_delta_rdlat_polish;       // method 3: final polish (-1: sf)
   int enable_intra_dip;     // enable intra DIP (data-driven intra) sequence
   int enable_smooth_intra;  // enable smooth intra modes for sequence
   int enable_paeth_intra;   // enable Paeth intra mode for sequence

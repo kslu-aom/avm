@@ -55,22 +55,24 @@ enum {
       (1 << NEW_NEARMV) | (1 << NEAR_NEWMV) | (1 << NEAR_NEARMV),
 };
 
+// Search methods for the WARP_DELTA (non-translational warp parameter)
+// refinement. Methods 1-3 derive the update from the spatial gradients of the
+// current warped prediction (optical-flow style); see mcomp.c for details.
 typedef enum {
-  WARP_DELTA_STEP_SEARCH = 0,  // Coordinate descent (plus/minus search)
-  WARP_DELTA_GRADIENT_SEARCH =
-      1,  // Fast 1x1 decoupled gradient direct parameter estimation
-  WARP_DELTA_GRADIENT_PLUS_REFINE =
-      2,  // 1x1 decoupled gradient estimation + 1-pass local polish
-  WARP_DELTA_GRADIENT_JOINT_2X2 = 3,  // 2x2 coupled joint solve
-  WARP_DELTA_GRADIENT_JOINT_2X2_PLUS_REFINE =
-      4,  // 2x2 coupled joint solve + directional polish
-  WARP_DELTA_GRADIENT_JOINT_FULL =
-      5,  // Full 4/6-parameter (+translation) coupled joint solve
-  WARP_DELTA_GRADIENT_JOINT_FULL_PLUS_REFINE =
-      6,  // Full 4/6-parameter coupled joint solve + directional polish
-  WARP_DELTA_GRADIENT_RDLAT =
-      7,  // Gradient quadratic model + RD-regularized lattice search with
-          // top-K verification + translational MV refine (WARP_NEWMV)
+  // Coordinate descent: +/-1 step per parameter per iteration, interleaved
+  // with translational MV refinement (WARP_NEWMV).
+  WARP_DELTA_STEP_SEARCH = 0,
+  // Decoupled per-parameter least-squares estimate (diagonal normal
+  // equations), rounded to the step lattice and verified with one render.
+  // Optional +/-1 polish via warp_delta_grad_refine_iters.
+  WARP_DELTA_GRADIENT_1X1 = 1,
+  // Coupled 2x2 least-squares estimate per parameter pair (rotzoom pair, or
+  // the two row pairs of the affine model); otherwise as 1X1.
+  WARP_DELTA_GRADIENT_JOINT_2X2 = 2,
+  // Full quadratic model (DC eliminated) + RD-regularized lattice search with
+  // top-K render verification, Gauss-Newton re-linearization and optional
+  // translational MV refinement (WARP_NEWMV).
+  WARP_DELTA_GRADIENT_RDLAT = 3,
 } WARP_DELTA_SEARCH_METHOD;
 
 /* This enumeration defines when the rate control recode loop will be
@@ -716,15 +718,15 @@ typedef struct INTER_MODE_SPEED_FEATURES {
   // Search method for WARP_DELTA parameters (see WARP_DELTA_SEARCH_METHOD).
   WARP_DELTA_SEARCH_METHOD warp_delta_search_method;
 
-  // Scaling factor for gradient step size in percentage (default: 100).
-  // Used by methods 1-6 only.
+  // WARP_DELTA_GRADIENT_1X1 / WARP_DELTA_GRADIENT_JOINT_2X2 controls:
+  // Scaling (in percent) applied to the continuous least-squares estimate
+  // before rounding it to the step lattice (default: 100).
   int warp_delta_grad_step_scale;
-
-  // Number of local refinement passes around gradient estimate (0: direct only,
-  // 1: 1-pass polish). Used by methods 1-6 only.
+  // Number of +/-1 coordinate polish passes run around the verified estimate
+  // (0: direct estimate only).
   int warp_delta_grad_refine_iters;
 
-  // WARP_DELTA_GRADIENT_RDLAT (method 7) controls:
+  // WARP_DELTA_GRADIENT_RDLAT controls:
   // Number of lattice candidates (ranked by the predicted RD cost) that are
   // verified with a real warped prediction per Gauss-Newton iteration.
   int warp_delta_rdlat_num_cands;

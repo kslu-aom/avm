@@ -574,30 +574,31 @@ const av2_codec_arg_definitions_t g_av2_codec_arg_defs = {
   .warp_delta_search_method =
       ARG_DEF(NULL, "warp-delta-search-method", 1,
               "Warp delta parameter search method "
-              "(0: step, 1: grad 1x1, 2: grad 1x1+refine, 3: grad 2x2, 4: grad "
-              "2x2+refine, 5: grad full, 6: grad full+refine, 7: grad "
-              "RD-lattice, -1: auto)"),
+              "(0: step search, 1: gradient 1x1, 2: gradient joint 2x2, "
+              "3: gradient RD-lattice, -1: auto)"),
   .warp_delta_grad_step_scale = ARG_DEF(
       NULL, "warp-delta-grad-step-scale", 1,
-      "Warp delta gradient search step scaling percentage (default: 100)"),
+      "Warp delta gradient search (methods 1, 2): scaling percentage of the "
+      "least-squares estimate before rounding (default: 100)"),
   .warp_delta_grad_refine_iters =
       ARG_DEF(NULL, "warp-delta-grad-refine-iters", 1,
-              "Warp delta gradient local refinement iterations (default: 0)"),
+              "Warp delta gradient search (methods 1, 2): number of +/-1 "
+              "coordinate polish passes (default: 0)"),
   .warp_delta_rdlat_num_cands =
       ARG_DEF(NULL, "warp-delta-rdlat-cands", 1,
-              "Warp delta RD-lattice search (method 7): number of lattice "
+              "Warp delta RD-lattice search (method 3): number of lattice "
               "candidates verified per iteration (1..8, -1: default 2)"),
   .warp_delta_rdlat_iters =
       ARG_DEF(NULL, "warp-delta-rdlat-iters", 1,
-              "Warp delta RD-lattice search (method 7): Gauss-Newton "
+              "Warp delta RD-lattice search (method 3): Gauss-Newton "
               "iterations (1..4, -1: default 1)"),
   .warp_delta_rdlat_mv_refine =
       ARG_DEF(NULL, "warp-delta-rdlat-mv-refine", 1,
-              "Warp delta RD-lattice search (method 7): refine translational "
+              "Warp delta RD-lattice search (method 3): refine translational "
               "MV in WARP_NEWMV (0: off, 1: on, -1: default 1)"),
   .warp_delta_rdlat_polish =
       ARG_DEF(NULL, "warp-delta-rdlat-polish", 1,
-              "Warp delta RD-lattice search (method 7): final +/-1 polish "
+              "Warp delta RD-lattice search (method 3): final +/-1 polish "
               "pass (0: off, 1: on, -1: default 0)"),
   .enable_intra_dip = ARG_DEF(NULL, "enable-intra-dip", 1,
                               "Enable intra data-driven prediction mode "
