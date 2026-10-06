@@ -441,6 +441,10 @@ const av2_codec_arg_definitions_t g_av2_codec_arg_defs = {
   .enable_high_motion = ARG_DEF(NULL, "enable-high-motion", 1,
                                 "Enable a large motion search window "
                                 "(0: false (default), 1: true"),
+  .enable_opfl_mv_search =
+      ARG_DEF(NULL, "enable-opfl-mv-search", 1,
+              "Enable optical flow based MV search for screen content "
+              "(0: false, 1: true (default))"),
   .enable_bawp = ARG_DEF(NULL, "enable-bawp", 1,
                          "Enable block adaptive weighted prediction (BAWP) "
                          "(0: false, 1: true (default))"),

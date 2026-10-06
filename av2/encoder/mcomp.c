@@ -244,6 +244,8 @@ void av2_set_mv_search_range(FullMvLimits *mv_limits, const MV *mv,
 
 // Obtain number of iterations for optical flow based MV search.
 int get_opfl_mv_iterations(const AV2_COMP *cpi, const MB_MODE_INFO *mbmi) {
+  if (!cpi->oxcf.tool_cfg.enable_opfl_mv_search) return 0;
+
   // Allowed only for screen content
   const AV2_COMMON *cm = &cpi->common;
   if (!cm->features.allow_screen_content_tools) return 0;
