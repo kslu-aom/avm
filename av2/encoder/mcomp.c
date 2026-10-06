@@ -5731,6 +5731,143 @@ static uint64_t warp_rdlat_eval_model(const WarpRdlatCtx *ctx,
                              (int64_t)rate * ctx->error_per_bit, ctx->rd_shift);
 }
 
+// Collects into `cands` (at most max_cands, sorted by predicted RD cost) the
+// lattice offsets d within [lo, hi] whose predicted cost improves on q0, the
+// predicted cost of the current model. Returns the number of candidates.
+static int warp_rdlat_collect_cands(
+    const double H[WARP_RDLAT_MAX_PARAMS][WARP_RDLAT_MAX_PARAMS],
+    const double g[WARP_RDLAT_MAX_PARAMS], int n,
+    const int rate_tab[WARP_RDLAT_MAX_PARAMS][WARP_RDLAT_RATE_TAB_SIZE],
+    const int *st0, const int *lo, const int *hi, int max_coded_index,
+    double lambda, double q0, int max_cands, WarpRdlatCand *cands) {
+  int num_cands = 0;
+  if (n == 2) {
+    // ROTZOOM: exhaustive search of the 2-D lattice.
+    int d[WARP_RDLAT_MAX_PARAMS] = { 0 };
+    for (d[0] = lo[0]; d[0] <= hi[0]; d[0]++) {
+      for (d[1] = lo[1]; d[1] <= hi[1]; d[1]++) {
+        if (!d[0] && !d[1]) continue;
+        const double q =
+            warp_rdlat_cost(H, g, d, n, rate_tab, st0, max_coded_index, lambda);
+        if (q < q0)
+          warp_rdlat_insert_cand(cands, max_cands, &num_cands, d, n, q);
+      }
+    }
+  } else {
+    // AFFINE: search the +/-1 boxes around the rounded full, half, and zero
+    // least-squares steps.
+    double Hs[6][6], bs[6], xs[6] = { 0 };
+    for (int r = 0; r < n; r++) {
+      for (int c = 0; c < n; c++) Hs[r][c] = H[r][c];
+      Hs[r][r] += 1e-6 * (1.0 + H[r][r]);
+      bs[r] = g[r];
+    }
+    if (!solve_linear_system_6(Hs, bs, xs, n)) {
+      for (int r = 0; r < n; r++) xs[r] = 0;
+    }
+    static const double kStepScale[3] = { 1.0, 0.5, 0.0 };
+    for (int t = 0; t < 3; t++) {
+      int c0[WARP_RDLAT_MAX_PARAMS];
+      for (int r = 0; r < n; r++) {
+        c0[r] = (int)lround(fclamp(xs[r] * kStepScale[t], lo[r], hi[r]));
+      }
+      int o[WARP_RDLAT_MAX_PARAMS];
+      for (o[0] = -1; o[0] <= 1; o[0]++) {
+        for (o[1] = -1; o[1] <= 1; o[1]++) {
+          for (o[2] = -1; o[2] <= 1; o[2]++) {
+            for (o[3] = -1; o[3] <= 1; o[3]++) {
+              int d[WARP_RDLAT_MAX_PARAMS];
+              int in_range = 1, nonzero = 0;
+              for (int r = 0; r < n; r++) {
+                d[r] = c0[r] + o[r];
+                in_range &= (d[r] >= lo[r] && d[r] <= hi[r]);
+                nonzero |= d[r];
+              }
+              if (!in_range || !nonzero) continue;
+              const double q = warp_rdlat_cost(H, g, d, n, rate_tab, st0,
+                                               max_coded_index, lambda);
+              if (q < q0)
+                warp_rdlat_insert_cand(cands, max_cands, &num_cands, d, n, q);
+            }
+          }
+        }
+      }
+    }
+  }
+  return num_cands;
+}
+
+// Gradient jump of WARP_DELTA_STEP_GRAD_JUMP: re-renders *best_wm_params (the
+// step search leaves the prediction of its last rejected candidate in dst),
+// builds the quadratic model around it, and verifies the top-K predicted
+// lattice offsets. Adopts the best verified model if it improves *best_rd.
+// Returns 1 if a jump was adopted.
+static int warp_delta_grad_jump(const WarpRdlatCtx *ctx, const MV *center_mv,
+                                int max_cands,
+                                WarpedMotionParams *best_wm_params,
+                                uint64_t *best_rd) {
+  const AV2_COMMON *const cm = ctx->cm;
+  MACROBLOCKD *xd = ctx->xd;
+  MB_MODE_INFO *mbmi = ctx->mbmi;
+  const SUBPEL_MOTION_SEARCH_PARAMS *ms_params = ctx->ms_params;
+  WarpedMotionParams *params = &mbmi->wm_params[0];
+  const BLOCK_SIZE bsize = mbmi->sb_type[PLANE_TYPE_Y];
+  const int bw = block_size_wide[bsize];
+  const int bh = block_size_high[bsize];
+  const int six_param = mbmi->six_param_warp_model_flag;
+  const int n = six_param ? 4 : 2;
+  const int step_size = ctx->step_size;
+  const int max_coded_index = ctx->max_coded_index;
+  const double lambda =
+      (double)ctx->error_per_bit / (double)(1 << ctx->rd_shift);
+
+  *params = *best_wm_params;
+  compute_motion_cost(xd, cm, ms_params, bsize, &mbmi->mv[0].as_mv,
+                      ctx->can_refine_mv);
+
+  const uint16_t *src = ms_params->var_params.ms_buffers.src->buf;
+  const int src_stride = ms_params->var_params.ms_buffers.src->stride;
+  double H[WARP_RDLAT_MAX_PARAMS][WARP_RDLAT_MAX_PARAMS];
+  double g[WARP_RDLAT_MAX_PARAMS];
+  warp_rdlat_build_model(src, src_stride, xd->plane[0].dst.buf,
+                         xd->plane[0].dst.stride, bw, bh, six_param, step_size,
+                         xd->bd, H, g);
+
+  int rate_tab[WARP_RDLAT_MAX_PARAMS][WARP_RDLAT_RATE_TAB_SIZE];
+  warp_rdlat_init_rate_tab(ctx->mode_costs, n, max_coded_index, rate_tab);
+  int st0[WARP_RDLAT_MAX_PARAMS] = { 0 };
+  int lo[WARP_RDLAT_MAX_PARAMS] = { 0 };
+  int hi[WARP_RDLAT_MAX_PARAMS] = { 0 };
+  for (int r = 0; r < n; r++) {
+    st0[r] = (best_wm_params->wmmat[2 + r] - ctx->base_params->wmmat[2 + r]) /
+             step_size;
+    lo[r] = -max_coded_index - st0[r];
+    hi[r] = max_coded_index - st0[r];
+  }
+  static const int kZero[WARP_RDLAT_MAX_PARAMS] = { 0 };
+  const double q0 =
+      warp_rdlat_cost(H, g, kZero, n, rate_tab, st0, max_coded_index, lambda);
+  WarpRdlatCand cands[WARP_RDLAT_MAX_CANDS];
+  const int num_cands =
+      warp_rdlat_collect_cands(H, g, n, rate_tab, st0, lo, hi, max_coded_index,
+                               lambda, q0, max_cands, cands);
+
+  const WarpedMotionParams center_params = *best_wm_params;
+  int improved = 0;
+  for (int k = 0; k < num_cands; k++) {
+    *params = center_params;
+    for (int r = 0; r < n; r++)
+      params->wmmat[2 + r] += cands[k].d[r] * step_size;
+    const uint64_t cand_rd = warp_rdlat_eval_model(ctx, center_mv);
+    if (cand_rd < *best_rd) {
+      *best_wm_params = *params;
+      *best_rd = cand_rd;
+      improved = 1;
+    }
+  }
+  return improved;
+}
+
 // Warp delta search with the gradient quadratic model and the RD-regularized
 // lattice search described above (WARP_DELTA_GRADIENT_RDLAT). Each iteration
 // builds the model around the best model so far, verifies the best lattice
@@ -5901,60 +6038,9 @@ static int pick_warp_delta_rdlat(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
     // Collect the lattice points with the lowest predicted RD cost, among the
     // ones predicted to improve on the current model.
     WarpRdlatCand cands[WARP_RDLAT_MAX_CANDS];
-    int num_cands = 0;
-    if (!six_param) {
-      // ROTZOOM: exhaustive search of the 2-D lattice.
-      int d[WARP_RDLAT_MAX_PARAMS] = { 0 };
-      for (d[0] = lo[0]; d[0] <= hi[0]; d[0]++) {
-        for (d[1] = lo[1]; d[1] <= hi[1]; d[1]++) {
-          if (!d[0] && !d[1]) continue;
-          const double q = warp_rdlat_cost(H, g, d, n, rate_tab, st0,
-                                           max_coded_index, lambda);
-          if (q < q0)
-            warp_rdlat_insert_cand(cands, max_cands, &num_cands, d, n, q);
-        }
-      }
-    } else {
-      // AFFINE: search the +/-1 boxes around the rounded full, half, and zero
-      // least-squares steps.
-      double Hs[6][6], bs[6], xs[6] = { 0 };
-      for (int r = 0; r < n; r++) {
-        for (int c = 0; c < n; c++) Hs[r][c] = H[r][c];
-        Hs[r][r] += 1e-6 * (1.0 + H[r][r]);
-        bs[r] = g[r];
-      }
-      if (!solve_linear_system_6(Hs, bs, xs, n)) {
-        for (int r = 0; r < n; r++) xs[r] = 0;
-      }
-      static const double kStepScale[3] = { 1.0, 0.5, 0.0 };
-      for (int t = 0; t < 3; t++) {
-        int c0[WARP_RDLAT_MAX_PARAMS];
-        for (int r = 0; r < n; r++) {
-          c0[r] = (int)lround(fclamp(xs[r] * kStepScale[t], lo[r], hi[r]));
-        }
-        int o[WARP_RDLAT_MAX_PARAMS];
-        for (o[0] = -1; o[0] <= 1; o[0]++) {
-          for (o[1] = -1; o[1] <= 1; o[1]++) {
-            for (o[2] = -1; o[2] <= 1; o[2]++) {
-              for (o[3] = -1; o[3] <= 1; o[3]++) {
-                int d[WARP_RDLAT_MAX_PARAMS];
-                int in_range = 1, nonzero = 0;
-                for (int r = 0; r < n; r++) {
-                  d[r] = c0[r] + o[r];
-                  in_range &= (d[r] >= lo[r] && d[r] <= hi[r]);
-                  nonzero |= d[r];
-                }
-                if (!in_range || !nonzero) continue;
-                const double q = warp_rdlat_cost(H, g, d, n, rate_tab, st0,
-                                                 max_coded_index, lambda);
-                if (q < q0)
-                  warp_rdlat_insert_cand(cands, max_cands, &num_cands, d, n, q);
-              }
-            }
-          }
-        }
-      }
-    }
+    const int num_cands =
+        warp_rdlat_collect_cands(H, g, n, rate_tab, st0, lo, hi,
+                                 max_coded_index, lambda, q0, max_cands, cands);
 
     // Verify the candidates with real predictions. dst_is_best tracks whether
     // xd->plane[0].dst still holds the prediction of best_wm_params.
@@ -6046,7 +6132,8 @@ int av2_pick_warp_delta(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
                         WARP_CANDIDATE *warp_param_stack,
                         int eval_motion_mode) {
   (void)eval_motion_mode;
-  switch (cpi->sf.inter_sf.warp_delta_search_method) {
+  const INTER_MODE_SPEED_FEATURES *const inter_sf = &cpi->sf.inter_sf;
+  switch (inter_sf->warp_delta_search_method) {
     case WARP_DELTA_GRADIENT_1X1:
     case WARP_DELTA_GRADIENT_JOINT_2X2:
       return pick_warp_delta_gradient(cpi, xd, mbmi, ms_params, mode_costs,
@@ -6055,8 +6142,15 @@ int av2_pick_warp_delta(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
       return pick_warp_delta_rdlat(cpi, xd, mbmi, ms_params, mode_costs,
                                    prev_best_models, warp_param_stack);
     case WARP_DELTA_STEP_SEARCH:
+    case WARP_DELTA_STEP_GRAD_JUMP:
     default: break;
   }
+  // Number of gradient jump proposals verified when the step search stalls
+  // (WARP_DELTA_STEP_GRAD_JUMP only).
+  const int num_jump_cands =
+      inter_sf->warp_delta_search_method == WARP_DELTA_STEP_GRAD_JUMP
+          ? clamp(inter_sf->warp_delta_rdlat_num_cands, 1, WARP_RDLAT_MAX_CANDS)
+          : 0;
   const AV2_COMMON *const cm = &cpi->common;
   WarpedMotionParams *params = &mbmi->wm_params[0];
   const BLOCK_SIZE bsize = mbmi->sb_type[PLANE_TYPE_Y];
@@ -6260,6 +6354,27 @@ int av2_pick_warp_delta(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
       }
     }
 
+    if (center_best_so_far && num_jump_cands) {
+      // The coordinate descent is stuck in a local minimum: try a gradient
+      // jump and resume the descent from it if one is adopted.
+      const WarpRdlatCtx ctx = { cm,
+                                 xd,
+                                 mbmi,
+                                 ms_params,
+                                 mode_costs,
+                                 sf,
+                                 &base_params,
+                                 step_size,
+                                 max_coded_index,
+                                 warp_precision_idx_rate,
+                                 error_per_bit,
+                                 RDDIV_BITS + AV2_PROB_COST_SHIFT -
+                                     RD_EPB_SHIFT + PIXEL_TRANSFORM_ERROR_SCALE,
+                                 can_refine_mv };
+      if (warp_delta_grad_jump(&ctx, &center_mv.as_mv, num_jump_cands,
+                               &best_wm_params, &best_rd))
+        center_best_so_far = 0;
+    }
     if (center_best_so_far) {
       break;
     }

@@ -571,11 +571,11 @@ const av2_codec_arg_definitions_t g_av2_codec_arg_defs = {
   .enable_warp_newmv_delta = ARG_DEF(NULL, "enable-warp-newmv-delta", 1,
                                      "Enable warp delta in WARP_NEWMV mode "
                                      "(0: false, 1: true (default))"),
-  .warp_delta_search_method =
-      ARG_DEF(NULL, "warp-delta-search-method", 1,
-              "Warp delta parameter search method "
-              "(0: step search, 1: gradient 1x1, 2: gradient joint 2x2, "
-              "3: gradient RD-lattice, -1: auto)"),
+  .warp_delta_search_method = ARG_DEF(
+      NULL, "warp-delta-search-method", 1,
+      "Warp delta parameter search method "
+      "(0: step search, 1: gradient 1x1, 2: gradient joint 2x2, "
+      "3: gradient RD-lattice, 4: step search + gradient jumps, -1: auto)"),
   .warp_delta_grad_step_scale = ARG_DEF(
       NULL, "warp-delta-grad-step-scale", 1,
       "Warp delta gradient search (methods 1, 2): scaling percentage of the "

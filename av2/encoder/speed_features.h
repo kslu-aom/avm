@@ -57,7 +57,8 @@ enum {
 
 // Search methods for the WARP_DELTA (non-translational warp parameter)
 // refinement. Methods 1-3 derive the update from the spatial gradients of the
-// current warped prediction (optical-flow style); see mcomp.c for details.
+// current warped prediction (optical-flow style), method 4 uses such updates
+// as jump proposals inside the step search; see mcomp.c for details.
 typedef enum {
   // Coordinate descent: +/-1 step per parameter per iteration, interleaved
   // with translational MV refinement (WARP_NEWMV).
@@ -73,6 +74,11 @@ typedef enum {
   // top-K render verification, Gauss-Newton re-linearization and optional
   // translational MV refinement (WARP_NEWMV).
   WARP_DELTA_GRADIENT_RDLAT = 3,
+  // Step search (method 0) that, whenever the coordinate descent stalls in a
+  // local minimum, builds the RDLAT quadratic model around the current best
+  // model and verifies its top-K lattice candidates as jump proposals; the
+  // descent resumes from an adopted jump.
+  WARP_DELTA_STEP_GRAD_JUMP = 4,
 } WARP_DELTA_SEARCH_METHOD;
 
 /* This enumeration defines when the rate control recode loop will be
@@ -728,7 +734,8 @@ typedef struct INTER_MODE_SPEED_FEATURES {
 
   // WARP_DELTA_GRADIENT_RDLAT controls:
   // Number of lattice candidates (ranked by the predicted RD cost) that are
-  // verified with a real warped prediction per Gauss-Newton iteration.
+  // verified with a real warped prediction per Gauss-Newton iteration. Also
+  // the number of jump proposals verified by WARP_DELTA_STEP_GRAD_JUMP.
   int warp_delta_rdlat_num_cands;
   // Number of Gauss-Newton iterations (re-linearization around the best
   // verified model).
