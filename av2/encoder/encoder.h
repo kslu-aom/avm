@@ -892,7 +892,7 @@ typedef struct {
   int enable_mv_traj;
   // enable a large motion search window
   int enable_high_motion;
-  // enable optical flow based MV search for screen content
+  // optical flow based MV search: 0: off, 1: screen content only, 2: all
   int enable_opfl_mv_search;
   // enable block adaptive weighted prediction
   int enable_bawp;

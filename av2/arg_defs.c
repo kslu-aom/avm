@@ -443,8 +443,8 @@ const av2_codec_arg_definitions_t g_av2_codec_arg_defs = {
                                 "(0: false (default), 1: true"),
   .enable_opfl_mv_search =
       ARG_DEF(NULL, "enable-opfl-mv-search", 1,
-              "Enable optical flow based MV search for screen content "
-              "(0: false, 1: true (default))"),
+              "Enable optical flow based MV search "
+              "(0: off, 1: screen content only (default), 2: all content)"),
   .enable_bawp = ARG_DEF(NULL, "enable-bawp", 1,
                          "Enable block adaptive weighted prediction (BAWP) "
                          "(0: false, 1: true (default))"),

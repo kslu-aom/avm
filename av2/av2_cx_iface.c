@@ -133,7 +133,7 @@ struct av2_extracfg {
   int enable_tip_refinemv;  // enable RefineMv and OPFL for TIP
   int enable_mv_traj;       // enable MV trajectory tracking
   int enable_high_motion;   // Enable a large motion search window
-  int enable_opfl_mv_search;  // Enable optical flow MV search (screen content)
+  int enable_opfl_mv_search;  // optical flow MV search: 0 off, 1 SC, 2 all
   int enable_bawp;          // enable block adaptive weighted prediction
   int enable_cwp;           // enable compound weighted prediction
   int enable_imp_msk_bld;   // enable implicit masked blending
