@@ -43,6 +43,7 @@ struct tcq_rate_t;
 struct tcq_coeff_ctx_t;
 struct tcq_param_t;
 struct LV_MAP_COEFF_COST;
+struct WienernsFeatureTaps;
 
 enum { NONE, RELU, SOFTSIGN, SIGMOID } UENUM1BYTE(ACTIVATION);
 #if CONFIG_NN_V2
@@ -422,8 +423,11 @@ if (avm_config("CONFIG_AV2_ENCODER") eq "yes") {
   specialize qw/ccso_derive_src_block avx2/;
 
   # WienerNS filter stats accumulation
-  add_proto qw/void av2_accumulate_wienerns_correlation/, "double *A_base, double *b_base, const int16_t *buf, int16_t y, int num_feat";
-  specialize qw/av2_accumulate_wienerns_correlation sse4_1 avx2/;
+  add_proto qw/void av2_accumulate_wienerns_correlation_batch/, "double *A_base, double *b_base, const int16_t *buf_batch, const int16_t *y_batch, int batch_size, int num_feat";
+  specialize qw/av2_accumulate_wienerns_correlation_batch avx2/;
+
+  add_proto qw/int64_t av2_compute_wienerns_features/, "const uint16_t *dgd, const uint16_t *luma, const uint16_t *src, int width, const struct WienernsFeatureTaps *taps, int16_t *feat, int16_t *y";
+  specialize qw/av2_compute_wienerns_features avx2/;
 }
 
 # WARPED_MOTION / GLOBAL_MOTION functions

@@ -419,8 +419,7 @@ list(
   "${AVM_ROOT}/av2/encoder/x86/av2_highbd_quantize_sse4.c"
   "${AVM_ROOT}/av2/encoder/x86/encodetxb_sse4.c"
   "${AVM_ROOT}/av2/encoder/x86/highbd_fwd_txfm_sse4.c"
-  "${AVM_ROOT}/av2/encoder/x86/rdopt_sse4.c"
-  "${AVM_ROOT}/av2/encoder/x86/pickrst_sse4.c")
+  "${AVM_ROOT}/av2/encoder/x86/rdopt_sse4.c")
 
 list(
   APPEND

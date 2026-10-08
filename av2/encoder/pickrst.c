@@ -1511,14 +1511,189 @@ static int compute_wienerns_filter_select_master(
   return 1;
 }
 
-void av2_accumulate_wienerns_correlation_c(double *A_base, double *b_base,
-                                           const int16_t *buf, int16_t y,
-                                           int num_feat) {
+// Accumulates the correlation stats of a batch of pixels:
+//   A[k][l] += sum_p feat_k[p] * feat_l[p], for l <= k,
+//   b[k] += sum_p feat_k[p] * y[p],
+// where feat_k[p] = buf_cols[k * WIENERNS_STATS_BATCH_SIZE + p]. The SIMD
+// versions always process WIENERNS_STATS_BATCH_SIZE pixels, so the entries for
+// p >= batch_size must be zero.
+void av2_accumulate_wienerns_correlation_batch_c(double *A_base, double *b_base,
+                                                 const int16_t *buf_cols,
+                                                 const int16_t *y_arr,
+                                                 int batch_size, int num_feat) {
   for (int k = 0; k < num_feat; ++k) {
-    for (int l = 0; l <= k; ++l) {
-      A_base[k * num_feat + l] += (double)buf[k] * (double)buf[l];
+    const int16_t *col_k = buf_cols + k * WIENERNS_STATS_BATCH_SIZE;
+    int32_t sum_b = 0;
+    for (int p = 0; p < batch_size; ++p) {
+      sum_b += (int32_t)col_k[p] * (int32_t)y_arr[p];
     }
-    b_base[k] += (double)buf[k] * (double)y;
+    b_base[k] += sum_b;
+
+    for (int l = 0; l <= k; ++l) {
+      const int16_t *col_l = buf_cols + l * WIENERNS_STATS_BATCH_SIZE;
+      int32_t sum_A = 0;
+      for (int p = 0; p < batch_size; ++p) {
+        sum_A += (int32_t)col_k[p] * (int32_t)col_l[p];
+      }
+      A_base[k * num_feat + l] += sum_A;
+    }
+  }
+}
+
+int64_t av2_compute_wienerns_features_c(const uint16_t *dgd,
+                                        const uint16_t *luma,
+                                        const uint16_t *src, int width,
+                                        const WienernsFeatureTaps *taps,
+                                        int16_t *feat, int16_t *y) {
+  assert(width <= WIENERNS_STATS_BATCH_SIZE);
+  int64_t sse = 0;
+  for (int p = 0; p < width; ++p) {
+    const int16_t dgd_c = (int16_t)dgd[p];
+    const int16_t luma_c = luma ? (int16_t)luma[p] : 0;
+    for (int k = 0; k < taps->num_feat; ++k) {
+      int16_t f = taps->feat_const[k];
+      for (int t = taps->dgd_start[k]; t < taps->dgd_start[k + 1]; ++t) {
+        f += (int16_t)dgd[p + taps->dgd_offset[t]] - dgd_c;
+      }
+      for (int t = taps->luma_start[k]; t < taps->luma_start[k + 1]; ++t) {
+        f += (int16_t)luma[p + taps->luma_offset[t]] - luma_c;
+      }
+      feat[k * WIENERNS_STATS_BATCH_SIZE + p] = f;
+    }
+    const int16_t yp = (int16_t)((int32_t)src[p] - (int32_t)dgd[p]);
+    y[p] = yp;
+    sse += (int64_t)yp * yp;
+  }
+  return sse;
+}
+
+// Builds the per-feature tap lists used by av2_compute_wienerns_features()
+// from the (possibly two) nonsep filter configurations.
+static void build_wienerns_feature_taps(
+    const WienernsFilterParameters *nsfilter_params, int is_uv, int dgd_stride,
+    int luma_stride, WienernsFeatureTaps *taps) {
+  const NonsepFilterConfig *cfg = &nsfilter_params->nsfilter_config;
+  const int num_feat = nsfilter_params->ncoeffs;
+  assert(num_feat <= WIENERNS_TAPS_MAX);
+  int dgd_count[WIENERNS_TAPS_MAX] = { 0 };
+  int luma_count[WIENERNS_TAPS_MAX] = { 0 };
+  memset(taps, 0, sizeof(*taps));
+  taps->num_feat = num_feat;
+
+  // First pass: count taps per feature.
+  for (int k = 0; k < cfg->num_pixels; ++k) {
+    const int pos = cfg->config[k][WIENERNS_BUF_POS];
+    const int r = cfg->config[k][WIENERNS_ROW_ID];
+    const int c = cfg->config[k][WIENERNS_COL_ID];
+    assert(pos < num_feat);
+    if (r == 0 && c == 0)
+      ++taps->feat_const[pos];
+    else
+      ++dgd_count[pos];
+  }
+  if (is_uv) {
+    for (int k = 0; k < cfg->num_pixels2; ++k) {
+      const int pos = cfg->config2[k][WIENERNS_BUF_POS];
+      const int r = cfg->config2[k][WIENERNS_ROW_ID];
+      const int c = cfg->config2[k][WIENERNS_COL_ID];
+      assert(pos < num_feat);
+      // A center luma tap contributes luma[x] - luma[x] = 0.
+      if (r != 0 || c != 0) ++luma_count[pos];
+    }
+  }
+  for (int k = 0; k < num_feat; ++k) {
+    taps->dgd_start[k + 1] = taps->dgd_start[k] + dgd_count[k];
+    taps->luma_start[k + 1] = taps->luma_start[k] + luma_count[k];
+  }
+  assert(taps->dgd_start[num_feat] <= WIENERNS_FEAT_TAPS_MAX);
+  assert(taps->luma_start[num_feat] <= WIENERNS_FEAT_TAPS_MAX);
+
+  // Second pass: fill in the offsets.
+  memset(dgd_count, 0, sizeof(dgd_count));
+  memset(luma_count, 0, sizeof(luma_count));
+  for (int k = 0; k < cfg->num_pixels; ++k) {
+    const int pos = cfg->config[k][WIENERNS_BUF_POS];
+    const int r = cfg->config[k][WIENERNS_ROW_ID];
+    const int c = cfg->config[k][WIENERNS_COL_ID];
+    if (r == 0 && c == 0) continue;
+    taps->dgd_offset[taps->dgd_start[pos] + dgd_count[pos]++] =
+        r * dgd_stride + c;
+  }
+  if (is_uv) {
+    for (int k = 0; k < cfg->num_pixels2; ++k) {
+      const int pos = cfg->config2[k][WIENERNS_BUF_POS];
+      const int r = cfg->config2[k][WIENERNS_ROW_ID];
+      const int c = cfg->config2[k][WIENERNS_COL_ID];
+      if (r == 0 && c == 0) continue;
+      taps->luma_offset[taps->luma_start[pos] + luma_count[pos]++] =
+          r * luma_stride + c;
+    }
+  }
+}
+
+// A batch of up to WIENERNS_STATS_BATCH_SIZE pixels, stored column-major:
+// feature k of pixel p is cols[k * WIENERNS_STATS_BATCH_SIZE + p].
+typedef struct {
+  DECLARE_ALIGNED(32, int16_t,
+                  cols[WIENERNS_TAPS_MAX * WIENERNS_STATS_BATCH_SIZE]);
+  DECLARE_ALIGNED(32, int16_t, y[WIENERNS_STATS_BATCH_SIZE]);
+  int count;
+} WienernsStatsBatch;
+
+// Accumulates the pixels of |batch| into A and b and empties the batch. The
+// SIMD versions always process WIENERNS_STATS_BATCH_SIZE pixels, so a partial
+// batch is zero-padded first.
+static void flush_wienerns_batch(WienernsStatsBatch *batch, int num_feat,
+                                 double *A, double *b) {
+  const int count = batch->count;
+  if (count == 0) return;
+  if (count < WIENERNS_STATS_BATCH_SIZE) {
+    const size_t pad = sizeof(int16_t) * (WIENERNS_STATS_BATCH_SIZE - count);
+    for (int k = 0; k < num_feat; ++k) {
+      memset(batch->cols + k * WIENERNS_STATS_BATCH_SIZE + count, 0, pad);
+    }
+    memset(batch->y + count, 0, pad);
+  }
+  av2_accumulate_wienerns_correlation_batch(A, b, batch->cols, batch->y, count,
+                                            num_feat);
+  batch->count = 0;
+}
+
+// Appends pixels [start, start + n) of |run| to |batch|, flushing the batch
+// into A and b whenever it becomes full.
+static AVM_INLINE void append_to_wienerns_batch(WienernsStatsBatch *batch,
+                                                const WienernsStatsBatch *run,
+                                                int start, int n, int num_feat,
+                                                double *A, double *b) {
+  while (n > 0) {
+    const int m = AVMMIN(n, WIENERNS_STATS_BATCH_SIZE - batch->count);
+    int16_t *dst = batch->cols + batch->count;
+    const int16_t *src = run->cols + start;
+    // Pixels are mostly appended in groups of (1 << MI_SIZE_LOG2) = 4, for
+    // which a fixed-size copy is much cheaper.
+    if (m == 4) {
+      for (int k = 0; k < num_feat; ++k) {
+        memcpy(dst + k * WIENERNS_STATS_BATCH_SIZE,
+               src + k * WIENERNS_STATS_BATCH_SIZE, 4 * sizeof(*dst));
+      }
+      memcpy(batch->y + batch->count, run->y + start, 4 * sizeof(*dst));
+    } else {
+      for (int k = 0; k < num_feat; ++k) {
+        for (int p = 0; p < m; ++p) {
+          dst[k * WIENERNS_STATS_BATCH_SIZE + p] =
+              src[k * WIENERNS_STATS_BATCH_SIZE + p];
+        }
+      }
+      for (int p = 0; p < m; ++p) {
+        batch->y[batch->count + p] = run->y[start + p];
+      }
+    }
+    batch->count += m;
+    start += m;
+    n -= m;
+    if (batch->count == WIENERNS_STATS_BATCH_SIZE) {
+      flush_wienerns_batch(batch, num_feat, A, b);
+    }
   }
 }
 
@@ -1528,7 +1703,7 @@ static int64_t compute_stats_for_wienerns_filter(
     const RestorationUnitInfo *rui, int bit_depth, double *A, double *b,
     int *num_pixels_in_class, const WienernsFilterParameters *nsfilter_params,
     int num_classes) {
-  (void)rui;
+  (void)bit_depth;  // clip_base() is the identity.
   const uint16_t *luma_hbd = rui->luma;
 
   const int total_dim_A = num_classes * WIENERNS_TAPS_MAX * WIENERNS_TAPS_MAX;
@@ -1541,75 +1716,77 @@ static int64_t compute_stats_for_wienerns_filter(
   const uint8_t *pc_wiener_sub_classify =
       get_pc_wiener_sub_classifier(num_classes, set_index);
 
-  int16_t buf[WIENERNS_TAPS_MAX];
   memset(A, 0, sizeof(*A) * total_dim_A);
   memset(b, 0, sizeof(*b) * total_dim_b);
   memset(num_pixels_in_class, 0, sizeof(*num_pixels_in_class) * num_classes);
 
-  const int(*wienerns_config)[3] = nsfilter_params->nsfilter_config.config;
-  int is_uv = (rui->plane != AVM_PLANE_Y);
-  const int(*wienerns_config2)[3] =
-      is_uv ? nsfilter_params->nsfilter_config.config2 : NULL;
-  const int end_pixel = is_uv ? nsfilter_params->nsfilter_config.num_pixels +
-                                    nsfilter_params->nsfilter_config.num_pixels2
-                              : nsfilter_params->nsfilter_config.num_pixels;
+  const int is_uv = (rui->plane != AVM_PLANE_Y);
   const int num_feat = nsfilter_params->ncoeffs;
+  WienernsFeatureTaps taps;
+  build_wienerns_feature_taps(nsfilter_params, is_uv, dgd_stride,
+                              rui->luma_stride, &taps);
+
+  // The stats are sums of exact integer products, so the order in which the
+  // pixels are accumulated does not matter. The RU is visited in a single
+  // raster pass and each pixel is added to the batch of its class.
+  WienernsStatsBatch batch[WIENERNS_MAX_CLASSES];
+  WienernsStatsBatch run;
+  for (int c_id = 0; c_id < num_classes; ++c_id) batch[c_id].count = 0;
 
   int64_t real_sse = 0;  // for debuggung purposes
-  for (int c_id = 0; c_id < num_classes; ++c_id) {
-    for (int i = limits->v_start; i < limits->v_end; ++i) {
-      for (int j = limits->h_start; j < limits->h_end; ++j) {
-        int dgd_id = i * dgd_stride + j;
-        int src_id = i * src_stride + j;
-
-        // Skip pixel if not of sub_class_id.
-        if (num_classes > 1) {
-          const int full_class_id =
-              rui->wiener_class_id[(i >> MI_SIZE_LOG2) *
-                                       rui->wiener_class_id_stride +
-                                   (j >> MI_SIZE_LOG2)];
-          const int sub_class_id = pc_wiener_sub_classify[full_class_id];
-          if (c_id != sub_class_id) continue;
+  const int width = limits->h_end - limits->h_start;
+  for (int i = limits->v_start; i < limits->v_end; ++i) {
+    const uint16_t *dgd_row = dgd_hbd + i * dgd_stride + limits->h_start;
+    const uint16_t *src_row = src_hbd + i * src_stride + limits->h_start;
+    const uint16_t *luma_row =
+        is_uv ? luma_hbd + i * rui->luma_stride + limits->h_start : NULL;
+    if (num_classes == 1) {
+      // Compute the features directly into the batch.
+      for (int j = 0; j < width;) {
+        const int w =
+            AVMMIN(WIENERNS_STATS_BATCH_SIZE - batch[0].count, width - j);
+        real_sse += av2_compute_wienerns_features(
+            dgd_row + j, luma_row ? luma_row + j : NULL, src_row + j, w, &taps,
+            batch[0].cols + batch[0].count, batch[0].y + batch[0].count);
+        batch[0].count += w;
+        j += w;
+        if (batch[0].count == WIENERNS_STATS_BATCH_SIZE) {
+          flush_wienerns_batch(&batch[0], num_feat, A, b);
         }
-
-        int luma_id = i * rui->luma_stride + j;
-        memset(buf, 0, sizeof(buf));
-        for (int k = 0; k < end_pixel; ++k) {
-          const int cross =
-              (is_uv && k >= nsfilter_params->nsfilter_config.num_pixels);
-
-          if (!cross) {
-            const int pos = wienerns_config[k][WIENERNS_BUF_POS];
-            const int r = wienerns_config[k][WIENERNS_ROW_ID];
-            const int c = wienerns_config[k][WIENERNS_COL_ID];
-            if (r == 0 && c == 0) {
-              buf[pos] += 1;
-              continue;
-            }
-            buf[pos] +=
-                clip_base((int16_t)dgd_hbd[(i + r) * dgd_stride + (j + c)] -
-                              (int16_t)dgd_hbd[dgd_id],
-                          bit_depth);
-          } else {
-            const int k2 = k - nsfilter_params->nsfilter_config.num_pixels;
-            const int pos = wienerns_config2[k2][WIENERNS_BUF_POS];
-            const int r = wienerns_config2[k2][WIENERNS_ROW_ID];
-            const int c = wienerns_config2[k2][WIENERNS_COL_ID];
-
-            buf[pos] += clip_base(
-                (int16_t)luma_hbd[(i + r) * rui->luma_stride + (j + c)] -
-                    (int16_t)luma_hbd[luma_id],
-                bit_depth);
-          }
-        }
-        int16_t y;
-        y = ((int64_t)src_hbd[src_id] - dgd_hbd[dgd_id]);
-        av2_accumulate_wienerns_correlation(
-            A + c_id * stride_A, b + c_id * stride_b, buf, y, num_feat);
-        real_sse += (int64_t)y * (int64_t)y;
-        ++num_pixels_in_class[c_id];
+      }
+      num_pixels_in_class[0] += width;
+      continue;
+    }
+    // Compute the features of a run of pixels, then distribute the run to the
+    // class batches. The class is constant over each horizontal group of
+    // (1 << MI_SIZE_LOG2) pixels.
+    const uint8_t *class_row =
+        rui->wiener_class_id +
+        (i >> MI_SIZE_LOG2) * rui->wiener_class_id_stride;
+    for (int j = 0; j < width; j += WIENERNS_STATS_BATCH_SIZE) {
+      const int w = AVMMIN(WIENERNS_STATS_BATCH_SIZE, width - j);
+      real_sse += av2_compute_wienerns_features(
+          dgd_row + j, luma_row ? luma_row + j : NULL, src_row + j, w, &taps,
+          run.cols, run.y);
+      for (int q = 0; q < w;) {
+        const int x = limits->h_start + j + q;
+        const int group_end = ((x >> MI_SIZE_LOG2) + 1) << MI_SIZE_LOG2;
+        const int n = AVMMIN(group_end - x, w - q);
+        const int c_id = pc_wiener_sub_classify[class_row[x >> MI_SIZE_LOG2]];
+        assert(c_id < num_classes);
+        append_to_wienerns_batch(&batch[c_id], &run, q, n, num_feat,
+                                 A + c_id * stride_A, b + c_id * stride_b);
+        num_pixels_in_class[c_id] += n;
+        q += n;
       }
     }
+  }
+  for (int c_id = 0; c_id < num_classes; ++c_id) {
+    flush_wienerns_batch(&batch[c_id], num_feat, A + c_id * stride_A,
+                         b + c_id * stride_b);
+  }
+
+  for (int c_id = 0; c_id < num_classes; ++c_id) {
     for (int k = 0; k < num_feat; ++k) {
       for (int l = k + 1; l < num_feat; ++l) {
         A[k * num_feat + l + c_id * stride_A] =

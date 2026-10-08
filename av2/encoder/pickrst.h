@@ -19,6 +19,28 @@ extern "C" {
 #include "av2/encoder/encoder.h"
 #include "avm_ports/system_state.h"
 
+#define WIENERNS_STATS_BATCH_SIZE 32
+#define WIENERNS_FEAT_TAPS_MAX (2 * WIENERNS_TAPS_MAX)
+
+// Precomputed description of how the WienerNS stats features are formed from
+// the degraded (and, for chroma, the co-located luma) pixels. Feature k of a
+// pixel at position x is
+//   sum_{t in dgd taps of k} (dgd[x + dgd_offset[t]] - dgd[x])
+//   + sum_{t in luma taps of k} (luma[x + luma_offset[t]] - luma[x])
+//   + feat_const[k],
+// evaluated with 16-bit wrap-around arithmetic. Offsets already include the
+// buffer strides. Taps with a zero offset contribute nothing and are dropped.
+typedef struct WienernsFeatureTaps {
+  int num_feat;
+  // Taps of feature k are [dgd_start[k], dgd_start[k + 1]) in dgd_offset.
+  int dgd_start[WIENERNS_TAPS_MAX + 1];
+  int dgd_offset[WIENERNS_FEAT_TAPS_MAX];
+  // Taps of feature k are [luma_start[k], luma_start[k + 1]) in luma_offset.
+  int luma_start[WIENERNS_TAPS_MAX + 1];
+  int luma_offset[WIENERNS_FEAT_TAPS_MAX];
+  int16_t feat_const[WIENERNS_TAPS_MAX];
+} WienernsFeatureTaps;
+
 struct yv12_buffer_config;
 struct AV2_COMP;
 
