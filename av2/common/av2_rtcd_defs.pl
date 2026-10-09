@@ -423,7 +423,7 @@ if (avm_config("CONFIG_AV2_ENCODER") eq "yes") {
   specialize qw/ccso_derive_src_block avx2/;
 
   # WienerNS filter stats accumulation
-  add_proto qw/void av2_accumulate_wienerns_correlation_batch/, "double *A_base, double *b_base, const int16_t *buf_batch, const int16_t *y_batch, int batch_size, int num_feat";
+  add_proto qw/void av2_accumulate_wienerns_correlation_batch/, "int64_t *A_base, int64_t *b_base, const int16_t *buf_batch, const int16_t *y_batch, int batch_size, int num_feat";
   specialize qw/av2_accumulate_wienerns_correlation_batch sse4_1 avx2 avx512/;
 
   add_proto qw/int64_t av2_compute_wienerns_features/, "const uint16_t *dgd, const uint16_t *luma, const uint16_t *src, int width, const struct WienernsFeatureTaps *taps, int16_t *feat, int16_t *y";

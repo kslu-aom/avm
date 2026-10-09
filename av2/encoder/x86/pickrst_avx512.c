@@ -16,12 +16,12 @@
 #include "av2/common/restoration.h"
 #include "av2/encoder/pickrst.h"
 
-static AVM_INLINE int32_t horizontal_add_s32x16(__m512i m) {
-  return _mm512_reduce_add_epi32(m);
+static AVM_INLINE int64_t horizontal_add_s32x16(__m512i m) {
+  return (int64_t)_mm512_reduce_add_epi32(m);
 }
 
 void av2_accumulate_wienerns_correlation_batch_avx512(
-    double *A_base, double *b_base, const int16_t *buf_cols,
+    int64_t *A_base, int64_t *b_base, const int16_t *buf_cols,
     const int16_t *y_arr, int batch_size, int num_feat) {
   (void)batch_size;
   const __m512i vy = _mm512_loadu_si512((const __m512i *)y_arr);
@@ -37,7 +37,7 @@ void av2_accumulate_wienerns_correlation_batch_avx512(
   }
 
   for (int k = 0; k < num_feat; ++k) {
-    double *const A_row = A_base + k * num_feat;
+    int64_t *const A_row = A_base + k * num_feat;
     const __m512i v_k = vk[k];
     for (int l = 0; l <= k; ++l) {
       const __m512i m = _mm512_madd_epi16(v_k, vk[l]);

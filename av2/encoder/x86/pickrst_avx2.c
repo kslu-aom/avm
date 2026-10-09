@@ -34,15 +34,15 @@ static AVM_INLINE __m128i hadd4_s32x8(__m256i a, __m256i b, __m256i c,
                        _mm256_extracti128_si256(abcd, 1));
 }
 
-// dst[0..3] += v[0..3]. The stats are integers below 2^53, so the double
-// additions are exact.
-static AVM_INLINE void add_s32x4_to_f64(double *dst, __m128i v) {
-  _mm256_storeu_pd(dst,
-                   _mm256_add_pd(_mm256_loadu_pd(dst), _mm256_cvtepi32_pd(v)));
+// dst[0..3] += sign-extended v[0..3].
+static AVM_INLINE void add_s32x4_to_s64(int64_t *dst, __m128i v) {
+  const __m256i d = _mm256_loadu_si256((const __m256i *)dst);
+  _mm256_storeu_si256((__m256i *)dst,
+                      _mm256_add_epi64(d, _mm256_cvtepi32_epi64(v)));
 }
 
 // dst[0..n-1] += v[0..n-1], n < 4.
-static AVM_INLINE void add_s32xn_to_f64(double *dst, __m128i v, int n) {
+static AVM_INLINE void add_s32xn_to_s64(int64_t *dst, __m128i v, int n) {
   int32_t tmp[4];
   _mm_storeu_si128((__m128i *)tmp, v);
   for (int i = 0; i < n; ++i) dst[i] += tmp[i];
@@ -55,7 +55,7 @@ static AVM_INLINE __m256i dot32(const __m256i *v0, const __m256i *v1, int k,
 }
 
 void av2_accumulate_wienerns_correlation_batch_avx2(
-    double *A_base, double *b_base, const int16_t *buf_cols,
+    int64_t *A_base, int64_t *b_base, const int16_t *buf_cols,
     const int16_t *y_arr, int batch_size, int num_feat) {
   (void)batch_size;
   // Columns [0, num_feat) are the features, column num_feat is y and the
@@ -81,32 +81,32 @@ void av2_accumulate_wienerns_correlation_batch_avx2(
     const __m128i s =
         hadd4_s32x8(dot32(v0, v1, k, y_idx), dot32(v0, v1, k + 1, y_idx),
                     dot32(v0, v1, k + 2, y_idx), dot32(v0, v1, k + 3, y_idx));
-    add_s32x4_to_f64(b_base + k, s);
+    add_s32x4_to_s64(b_base + k, s);
   }
   if (k < num_feat) {
     // Columns past num_feat are y or zero; the extra sums are discarded.
     const __m128i s =
         hadd4_s32x8(dot32(v0, v1, k, y_idx), dot32(v0, v1, k + 1, y_idx),
                     dot32(v0, v1, k + 2, y_idx), dot32(v0, v1, k + 3, y_idx));
-    add_s32xn_to_f64(b_base + k, s, num_feat - k);
+    add_s32xn_to_s64(b_base + k, s, num_feat - k);
   }
 
   // A[k][l] += <col_k, col_l>, l <= k.
   for (k = 0; k < num_feat; ++k) {
-    double *const A_row = A_base + k * num_feat;
+    int64_t *const A_row = A_base + k * num_feat;
     int l = 0;
     for (; l + 4 <= k + 1; l += 4) {
       const __m128i s =
           hadd4_s32x8(dot32(v0, v1, k, l), dot32(v0, v1, k, l + 1),
                       dot32(v0, v1, k, l + 2), dot32(v0, v1, k, l + 3));
-      add_s32x4_to_f64(A_row + l, s);
+      add_s32x4_to_s64(A_row + l, s);
     }
     if (l <= k) {
       // l + 3 <= k + 3 <= num_feat + 2, which is within the padded columns.
       const __m128i s =
           hadd4_s32x8(dot32(v0, v1, k, l), dot32(v0, v1, k, l + 1),
                       dot32(v0, v1, k, l + 2), dot32(v0, v1, k, l + 3));
-      add_s32xn_to_f64(A_row + l, s, k + 1 - l);
+      add_s32xn_to_s64(A_row + l, s, k + 1 - l);
     }
   }
 }

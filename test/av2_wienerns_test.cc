@@ -30,7 +30,7 @@ using libavm_test::ACMRandom;
 
 namespace {
 
-typedef void (*AccumulateWienernsCorrFunc)(double *A_base, double *b_base,
+typedef void (*AccumulateWienernsCorrFunc)(int64_t *A_base, int64_t *b_base,
                                            const int16_t *buf_batch,
                                            const int16_t *y_batch,
                                            int batch_size, int num_feat);
@@ -65,10 +65,10 @@ static const int kNumFeatTests =
     sizeof(kTestFeatCounts) / sizeof(kTestFeatCounts[0]);
 
 void WienernsCorrTest::RunRandomTest() {
-  double A_ref[WIENERNS_TAPS_MAX * WIENERNS_TAPS_MAX];
-  double A_tst[WIENERNS_TAPS_MAX * WIENERNS_TAPS_MAX];
-  double b_ref[WIENERNS_TAPS_MAX];
-  double b_tst[WIENERNS_TAPS_MAX];
+  int64_t A_ref[WIENERNS_TAPS_MAX * WIENERNS_TAPS_MAX];
+  int64_t A_tst[WIENERNS_TAPS_MAX * WIENERNS_TAPS_MAX];
+  int64_t b_ref[WIENERNS_TAPS_MAX];
+  int64_t b_tst[WIENERNS_TAPS_MAX];
   int16_t buf[WIENERNS_TAPS_MAX * WIENERNS_STATS_BATCH_SIZE];
   int16_t y[WIENERNS_STATS_BATCH_SIZE];
 
@@ -78,12 +78,12 @@ void WienernsCorrTest::RunRandomTest() {
 
     for (int iter = 0; iter < 500 && !HasFatalFailure(); ++iter) {
       for (int i = 0; i < num_feat * num_feat; ++i) {
-        const double init_val = static_cast<double>(rnd_.Rand31() % 100000);
+        const int64_t init_val = static_cast<int64_t>(rnd_.Rand31() % 100000);
         A_ref[i] = init_val;
         A_tst[i] = init_val;
       }
       for (int i = 0; i < num_feat; ++i) {
-        const double init_val = static_cast<double>(rnd_.Rand31() % 100000);
+        const int64_t init_val = static_cast<int64_t>(rnd_.Rand31() % 100000);
         b_ref[i] = init_val;
         b_tst[i] = init_val;
       }
@@ -105,13 +105,13 @@ void WienernsCorrTest::RunRandomTest() {
       target_func_(A_tst, b_tst, buf, y, batch_size, num_feat);
 
       for (int k = 0; k < num_feat; ++k) {
-        ASSERT_DOUBLE_EQ(b_ref[k], b_tst[k])
+        ASSERT_EQ(b_ref[k], b_tst[k])
             << "b mismatch at index " << k << " for num_feat=" << num_feat;
       }
 
       for (int i = 0; i < num_feat; ++i) {
         for (int j = 0; j <= i; ++j) {
-          ASSERT_DOUBLE_EQ(A_ref[i * num_feat + j], A_tst[i * num_feat + j])
+          ASSERT_EQ(A_ref[i * num_feat + j], A_tst[i * num_feat + j])
               << "A mismatch at (" << i << ", " << j
               << ") for num_feat=" << num_feat;
         }
@@ -121,10 +121,10 @@ void WienernsCorrTest::RunRandomTest() {
 }
 
 void WienernsCorrTest::RunExtremeTest() {
-  double A_ref[WIENERNS_TAPS_MAX * WIENERNS_TAPS_MAX];
-  double A_tst[WIENERNS_TAPS_MAX * WIENERNS_TAPS_MAX];
-  double b_ref[WIENERNS_TAPS_MAX];
-  double b_tst[WIENERNS_TAPS_MAX];
+  int64_t A_ref[WIENERNS_TAPS_MAX * WIENERNS_TAPS_MAX];
+  int64_t A_tst[WIENERNS_TAPS_MAX * WIENERNS_TAPS_MAX];
+  int64_t b_ref[WIENERNS_TAPS_MAX];
+  int64_t b_tst[WIENERNS_TAPS_MAX];
   int16_t buf[WIENERNS_TAPS_MAX * WIENERNS_STATS_BATCH_SIZE];
   int16_t y[WIENERNS_STATS_BATCH_SIZE];
 
@@ -157,14 +157,13 @@ void WienernsCorrTest::RunExtremeTest() {
         target_func_(A_tst, b_tst, buf, y, 1, num_feat);
 
         for (int k = 0; k < num_feat; ++k) {
-          ASSERT_DOUBLE_EQ(b_ref[k], b_tst[k])
-              << "Extreme b mismatch at index " << k
-              << " for num_feat=" << num_feat;
+          ASSERT_EQ(b_ref[k], b_tst[k]) << "Extreme b mismatch at index " << k
+                                        << " for num_feat=" << num_feat;
         }
 
         for (int i = 0; i < num_feat; ++i) {
           for (int j = 0; j <= i; ++j) {
-            ASSERT_DOUBLE_EQ(A_ref[i * num_feat + j], A_tst[i * num_feat + j])
+            ASSERT_EQ(A_ref[i * num_feat + j], A_tst[i * num_feat + j])
                 << "Extreme A mismatch at (" << i << ", " << j
                 << ") for num_feat=" << num_feat;
           }
@@ -175,10 +174,10 @@ void WienernsCorrTest::RunExtremeTest() {
 }
 
 void WienernsCorrTest::RunSpeedTest(int run_times) {
-  double A_ref[WIENERNS_TAPS_MAX * WIENERNS_TAPS_MAX] = { 0.0 };
-  double A_tst[WIENERNS_TAPS_MAX * WIENERNS_TAPS_MAX] = { 0.0 };
-  double b_ref[WIENERNS_TAPS_MAX] = { 0.0 };
-  double b_tst[WIENERNS_TAPS_MAX] = { 0.0 };
+  int64_t A_ref[WIENERNS_TAPS_MAX * WIENERNS_TAPS_MAX] = { 0 };
+  int64_t A_tst[WIENERNS_TAPS_MAX * WIENERNS_TAPS_MAX] = { 0 };
+  int64_t b_ref[WIENERNS_TAPS_MAX] = { 0 };
+  int64_t b_tst[WIENERNS_TAPS_MAX] = { 0 };
   int16_t buf[WIENERNS_TAPS_MAX * WIENERNS_STATS_BATCH_SIZE];
   int16_t y[WIENERNS_STATS_BATCH_SIZE];
   const int batch_size = WIENERNS_STATS_BATCH_SIZE;

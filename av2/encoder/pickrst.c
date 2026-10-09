@@ -165,8 +165,8 @@ typedef struct {
 
 // RU statistics for solving Wiener filters.
 typedef struct RstUnitStats {
-  double A[WIENERNS_R_SIZE];
-  double b[WIENERNS_B_SIZE];
+  int64_t A[WIENERNS_R_SIZE];
+  int64_t b[WIENERNS_B_SIZE];
   double weight;  // Importance of this stat in the frame.
   int64_t real_sse;
   int num_stats_classes;
@@ -187,8 +187,8 @@ typedef struct RstUnitSnapshot {
   int64_t merge_sse_cand;
   int64_t merge_bits_cand;
   // Pointers to respective stats in RstUnitStats.
-  const double *A;
-  const double *b;
+  const int64_t *A;
+  const int64_t *b;
   // Nonseparable Wiener filter info.
   WienerNonsepInfoBank ref_wienerns_bank;
 } RstUnitSnapshot;
@@ -1236,7 +1236,7 @@ static void initialize_bank_with_best_frame_filter_match(
 }
 
 static int compute_wienerns_filter_select_sym(
-    int n, const int *select, const double *A, int stride, const double *b,
+    int n, const int *select, const int64_t *A, int stride, const int64_t *b,
     double *tmpbuf, int16_t *nsfilter,
     const WienernsFilterParameters *nsfilter_params) {
   int ncoeffs1, ncoeffs2;
@@ -1268,22 +1268,24 @@ static int compute_wienerns_filter_select_sym(
       if (is_asym_coeff_j && (j & 1) == 1) continue;
       const int is_merge_j = is_asym_coeff_j && (j & 1) == 0;
       if (is_merge_i && is_merge_j)
-        sym_A[ip * stridep + jp] = A[i * stride + j] + A[i * stride + j + 1] +
-                                   A[(i + 1) * stride + j] +
-                                   A[(i + 1) * stride + j + 1];
+        sym_A[ip * stridep + jp] =
+            (double)(A[i * stride + j] + A[i * stride + j + 1] +
+                     A[(i + 1) * stride + j] + A[(i + 1) * stride + j + 1]);
       else if (is_merge_i)
-        sym_A[ip * stridep + jp] = A[i * stride + j] + A[(i + 1) * stride + j];
+        sym_A[ip * stridep + jp] =
+            (double)(A[i * stride + j] + A[(i + 1) * stride + j]);
       else if (is_merge_j)
-        sym_A[ip * stridep + jp] = A[i * stride + j] + A[i * stride + j + 1];
+        sym_A[ip * stridep + jp] =
+            (double)(A[i * stride + j] + A[i * stride + j + 1]);
       else
-        sym_A[ip * stridep + jp] = A[i * stride + j];
+        sym_A[ip * stridep + jp] = (double)A[i * stride + j];
       if (ip != jp) sym_A[jp * stridep + ip] = sym_A[ip * stridep + jp];
       jp++;
     }
     if (is_merge_i)
-      sym_b[ip] = b[i] + b[i + 1];
+      sym_b[ip] = (double)(b[i] + b[i + 1]);
     else
-      sym_b[ip] = b[i];
+      sym_b[ip] = (double)b[i];
     ip++;
   }
   int np = ip;
@@ -1347,7 +1349,7 @@ finished:
 }
 
 static int compute_wienerns_filter_select(
-    int n, const int *select, const double *A, int stride, const double *b,
+    int n, const int *select, const int64_t *A, int stride, const int64_t *b,
     double *tmpbuf, int16_t *nsfilter,
     const WienernsFilterParameters *nsfilter_params) {
   double sel_A[WIENERNS_A_SIZE] = { 0 };
@@ -1359,10 +1361,10 @@ static int compute_wienerns_filter_select(
     int jp = 0;
     for (int j = 0; j < n; ++j) {
       if (!select[j]) continue;
-      sel_A[ip * stridep + jp] = A[i * stride + j];
+      sel_A[ip * stridep + jp] = (double)A[i * stride + j];
       jp++;
     }
-    sel_b[ip] = b[i];
+    sel_b[ip] = (double)b[i];
     ip++;
   }
   int np = ip;
@@ -1404,7 +1406,7 @@ static int compute_wienerns_filter_select(
 
 static int compute_wienerns_filter_select_master_basic(
     const RestSearchCtxt *rsc, WienerNonsepInfo *filter, int c_id, int n, int s,
-    const double *A, int stride, const double *b, double *tmpbuf,
+    const int64_t *A, int stride, const int64_t *b, double *tmpbuf,
     const WienernsFilterParameters *nsfilter_params, int do_sym_search) {
   double cost = DBL_MAX, cost_sym = DBL_MAX;
   int16_t *nsfilter = nsfilter_taps(filter, c_id);
@@ -1456,7 +1458,7 @@ static int compute_wienerns_filter_select_master_basic(
 static int compute_wienerns_filter_select_master(
     const RestSearchCtxt *rsc, const RestorationTileLimits *limits,
     const AV2PixelRect *tile_rect, RestorationUnitInfo *rui, int c_id, int n,
-    int s, const double *A, int stride, const double *b, double *tmpbuf,
+    int s, const int64_t *A, int stride, const int64_t *b, double *tmpbuf,
     const WienernsFilterParameters *nsfilter_params, int do_sym_search) {
   double cost = DBL_MAX, cost_sym = DBL_MAX;
   int16_t *nsfilter = nsfilter_taps(&rui->wienerns_info, c_id);
@@ -1517,7 +1519,8 @@ static int compute_wienerns_filter_select_master(
 // where feat_k[p] = buf_cols[k * WIENERNS_STATS_BATCH_SIZE + p]. The SIMD
 // versions always process WIENERNS_STATS_BATCH_SIZE pixels, so the entries for
 // p >= batch_size must be zero.
-void av2_accumulate_wienerns_correlation_batch_c(double *A_base, double *b_base,
+void av2_accumulate_wienerns_correlation_batch_c(int64_t *A_base,
+                                                 int64_t *b_base,
                                                  const int16_t *buf_cols,
                                                  const int16_t *y_arr,
                                                  int batch_size, int num_feat) {
@@ -1644,7 +1647,7 @@ typedef struct {
 // SIMD versions always process WIENERNS_STATS_BATCH_SIZE pixels, so a partial
 // batch is zero-padded first.
 static void flush_wienerns_batch(WienernsStatsBatch *batch, int num_feat,
-                                 double *A, double *b) {
+                                 int64_t *A, int64_t *b) {
   const int count = batch->count;
   if (count == 0) return;
   if (count < WIENERNS_STATS_BATCH_SIZE) {
@@ -1664,7 +1667,7 @@ static void flush_wienerns_batch(WienernsStatsBatch *batch, int num_feat,
 static AVM_INLINE void append_to_wienerns_batch(WienernsStatsBatch *batch,
                                                 const WienernsStatsBatch *run,
                                                 int start, int n, int num_feat,
-                                                double *A, double *b) {
+                                                int64_t *A, int64_t *b) {
   while (n > 0) {
     const int m = AVMMIN(n, WIENERNS_STATS_BATCH_SIZE - batch->count);
     int16_t *dst = batch->cols + batch->count;
@@ -1700,7 +1703,7 @@ static AVM_INLINE void append_to_wienerns_batch(WienernsStatsBatch *batch,
 static int64_t compute_stats_for_wienerns_filter(
     const uint16_t *dgd_hbd, const uint16_t *src_hbd,
     const RestorationTileLimits *limits, int dgd_stride, int src_stride,
-    const RestorationUnitInfo *rui, int bit_depth, double *A, double *b,
+    const RestorationUnitInfo *rui, int bit_depth, int64_t *A, int64_t *b,
     int *num_pixels_in_class, const WienernsFilterParameters *nsfilter_params,
     int num_classes) {
   (void)bit_depth;  // clip_base() is the identity.
@@ -1799,8 +1802,8 @@ static int64_t compute_stats_for_wienerns_filter(
 
 static int compute_quantized_wienerns_filter(
     RestSearchCtxt *rsc, const RestorationTileLimits *limits,
-    const AV2PixelRect *tile_rect, RestorationUnitInfo *rui, const double *A,
-    const double *b, int64_t real_sse,
+    const AV2PixelRect *tile_rect, RestorationUnitInfo *rui, const int64_t *A,
+    const int64_t *b, int64_t real_sse,
     const WienernsFilterParameters *nsfilter_params) {
   const int num_classes = rsc->num_filter_classes;
   assert(num_classes == rsc->wienerns_bank.filter[0].num_classes);
@@ -2021,7 +2024,7 @@ double accumulate_merge_stats(const RestSearchCtxt *rsc,
                               const WienerNonsepInfo *ref_wienerns_info_cand,
                               int begin_idx_cand, Vector *current_unit_stack,
                               Vector *current_unit_indices,
-                              double *solver_A_AVG, double *solver_b_AVG,
+                              int64_t *solver_A_AVG, int64_t *solver_b_AVG,
                               int dim_A, int dim_b, int offset_A, int offset_b,
                               int wiener_class_id) {
   (void)current_unit_indices;
@@ -2272,9 +2275,9 @@ static void search_wienerns_visitor(const RestorationTileLimits *limits,
     rui.wiener_class_id_restrict = -1;
     calc_finer_tile_search_error(rsc, limits, &rsc->tile_rect, &rui);
   }
-  double solver_A_AVG[WIENERNS_TAPS_MAX * WIENERNS_TAPS_MAX];
+  int64_t solver_A_AVG[WIENERNS_TAPS_MAX * WIENERNS_TAPS_MAX];
   const int class_dim_A = WIENERNS_TAPS_MAX * WIENERNS_TAPS_MAX;
-  double solver_b_AVG[WIENERNS_TAPS_MAX];
+  int64_t solver_b_AVG[WIENERNS_TAPS_MAX];
   const int class_dim_b = WIENERNS_TAPS_MAX;
   const int coeffs_dim_A = nsfilter_params->ncoeffs * nsfilter_params->ncoeffs;
   const int coeffs_dim_b = nsfilter_params->ncoeffs;
@@ -3084,6 +3087,9 @@ static int count_classes_with_no_pixels(const RestSearchCtxt *rsc) {
   return unoccupied;
 }
 
+#define RU_ON_WEIGHT 1
+#define RU_OFF_WEIGHT 1e-10
+
 // Calculates the weighted sum of all frame-level statistics. Useful in deriving
 // frame-level Wiener filters.
 static void weighted_sum_all_stats(const RestSearchCtxt *rsc,
@@ -3108,17 +3114,17 @@ static void weighted_sum_all_stats(const RestSearchCtxt *rsc,
     sum_stats->weight += weight;
     // End: not really needed.
 
+    if (weight != RU_ON_WEIGHT) continue;
+
     for (int c_id = 0; c_id < sum_stats->num_stats_classes; ++c_id) {
       for (int i = 0; i < num_feat * num_feat; ++i) {
-        sum_stats->A[c_id * stride_A + i] +=
-            weight * unit_stat->A[c_id * stride_A + i];
+        sum_stats->A[c_id * stride_A + i] += unit_stat->A[c_id * stride_A + i];
       }
       for (int i = 0; i < num_feat; ++i) {
-        sum_stats->b[c_id * stride_b + i] +=
-            weight * unit_stat->b[c_id * stride_b + i];
+        sum_stats->b[c_id * stride_b + i] += unit_stat->b[c_id * stride_b + i];
       }
       sum_stats->num_pixels_in_class[c_id] +=
-          (int)(weight * unit_stat->num_pixels_in_class[c_id]);
+          unit_stat->num_pixels_in_class[c_id];
     }
   }
 }
@@ -3194,8 +3200,8 @@ typedef struct RdResults {
 // (i) calculate d, (ii) detect a suboptimal filter and set it to zero.
 // (Suboptimal filters can result during discretization of filter-taps.)
 // Returned result is scaled up by tap_qstep * tap_qstep.
-static double calculate_distortion_improvement(const double *A, int stride,
-                                               const double *b, int num_feat,
+static double calculate_distortion_improvement(const int64_t *A, int stride,
+                                               const int64_t *b, int num_feat,
                                                const int16_t *filter_taps,
                                                int tap_qstep) {
   double del_d = 0;
@@ -3203,10 +3209,10 @@ static double calculate_distortion_improvement(const double *A, int stride,
     // f^T A f.
     double tmp_sum = 0;
     for (int j = 0; j < num_feat; ++j) {
-      tmp_sum += A[i * stride + j] * filter_taps[j];
+      tmp_sum += (double)A[i * stride + j] * filter_taps[j];
     }
     // f^T A f - 2 * b^T f.
-    del_d += (tmp_sum - 2 * b[i] * tap_qstep) * filter_taps[i];
+    del_d += (tmp_sum - 2.0 * (double)b[i] * tap_qstep) * filter_taps[i];
   }
   return del_d;
 }
@@ -3260,9 +3266,6 @@ static void solve_filters_from_stats_wienerns(const RestSearchCtxt *rsc,
     }
   }
 }
-
-#define RU_ON_WEIGHT 1
-#define RU_OFF_WEIGHT 1e-10
 
 // Calculates the cost of using frame-level filters on a picture by
 //   (i) determining per RU on-off mode based on R-D,
