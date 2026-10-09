@@ -232,6 +232,12 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Values(av2_accumulate_wienerns_correlation_batch_avx2));
 #endif  // HAVE_AVX2
 
+#if HAVE_AVX512
+INSTANTIATE_TEST_SUITE_P(
+    AVX512, WienernsCorrTest,
+    ::testing::Values(av2_accumulate_wienerns_correlation_batch_avx512));
+#endif  // HAVE_AVX512
+
 typedef int64_t (*ComputeWienernsFeaturesFunc)(
     const uint16_t *dgd, const uint16_t *luma, const uint16_t *src, int width,
     const WienernsFeatureTaps *taps, int16_t *feat, int16_t *y);
