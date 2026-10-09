@@ -220,6 +220,12 @@ TEST_P(WienernsCorrTest, RandomValues) { RunRandomTest(); }
 TEST_P(WienernsCorrTest, ExtremeValues) { RunExtremeTest(); }
 TEST_P(WienernsCorrTest, DISABLED_Speed) { RunSpeedTest(20000); }
 
+#if HAVE_SSE4_1
+INSTANTIATE_TEST_SUITE_P(
+    SSE4_1, WienernsCorrTest,
+    ::testing::Values(av2_accumulate_wienerns_correlation_batch_sse4_1));
+#endif  // HAVE_SSE4_1
+
 #if HAVE_AVX2
 INSTANTIATE_TEST_SUITE_P(
     AVX2, WienernsCorrTest,
@@ -357,6 +363,12 @@ TEST_P(WienernsFeatureTest, RandomValues) {
   RunCheck(2000, 12);
 }
 TEST_P(WienernsFeatureTest, DISABLED_Speed) { RunSpeed(1000000); }
+
+#if HAVE_SSE4_1
+INSTANTIATE_TEST_SUITE_P(
+    SSE4_1, WienernsFeatureTest,
+    ::testing::Values(av2_compute_wienerns_features_sse4_1));
+#endif  // HAVE_SSE4_1
 
 #if HAVE_AVX2
 INSTANTIATE_TEST_SUITE_P(AVX2, WienernsFeatureTest,
