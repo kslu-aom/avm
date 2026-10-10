@@ -187,7 +187,8 @@ struct av2_extracfg {
   int warp_delta_search_method;     // warp delta search method (0: step,
                                     // 1: grad 1x1, 2: grad joint 2x2,
                                     // 3: grad RD-lattice, 4: step search +
-                                    // grad jumps, -1: auto)
+                                    // grad jumps, 5: 4 with measured
+                                    // curvature, -1: auto)
   int warp_delta_grad_step_scale;    // warp delta grad step scale percentage
   int warp_delta_grad_refine_iters;  // warp delta grad refine iters
   int warp_delta_rdlat_num_cands;    // method 3: verified candidates (-1: sf)

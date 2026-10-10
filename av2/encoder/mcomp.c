@@ -5797,23 +5797,67 @@ static int warp_rdlat_collect_cands(
   return num_cands;
 }
 
+// RD costs measured by the coordinate descent at the +1 / -1 neighbours of
+// the current center (UINT64_MAX if a neighbour was not evaluated).
+typedef struct {
+  uint64_t rd[WARP_RDLAT_MAX_PARAMS][2];
+  uint64_t rd_center;
+} WarpDeltaProbes;
+
+// Builds the image-gradient quadratic model around *best_wm_params (which is
+// re-rendered: the step search leaves the prediction of its last rejected
+// candidate in dst) and substitutes the measured diagonal / slope of the
+// axes flagged in `measured`, rescaling the off-diagonal coupling so that its
+// normalized correlation structure H_rc / sqrt(H_rr H_cc) is preserved.
+static void warp_delta_measured_model(
+    const WarpRdlatCtx *ctx, const uint16_t *src, int src_stride,
+    const WarpedMotionParams *best_wm_params,
+    const double hm[WARP_RDLAT_MAX_PARAMS],
+    const double gm[WARP_RDLAT_MAX_PARAMS],
+    const int measured[WARP_RDLAT_MAX_PARAMS],
+    double H[WARP_RDLAT_MAX_PARAMS][WARP_RDLAT_MAX_PARAMS],
+    double g[WARP_RDLAT_MAX_PARAMS]) {
+  MACROBLOCKD *xd = ctx->xd;
+  MB_MODE_INFO *mbmi = ctx->mbmi;
+  const BLOCK_SIZE bsize = mbmi->sb_type[PLANE_TYPE_Y];
+  const int six_param = mbmi->six_param_warp_model_flag;
+  const int n = six_param ? 4 : 2;
+  mbmi->wm_params[0] = *best_wm_params;
+  compute_motion_cost(xd, ctx->cm, ctx->ms_params, bsize, &mbmi->mv[0].as_mv,
+                      ctx->can_refine_mv);
+  warp_rdlat_build_model(src, src_stride, xd->plane[0].dst.buf,
+                         xd->plane[0].dst.stride, block_size_wide[bsize],
+                         block_size_high[bsize], six_param, ctx->step_size,
+                         xd->bd, H, g);
+  double scale[WARP_RDLAT_MAX_PARAMS] = { 1.0, 1.0, 1.0, 1.0 };
+  for (int r = 0; r < n; r++) {
+    if (!measured[r]) continue;
+    if (H[r][r] > 0) scale[r] = sqrt(hm[r] / H[r][r]);
+    H[r][r] = hm[r];
+    g[r] = gm[r];
+  }
+  for (int r = 0; r < n; r++)
+    for (int c = 0; c < n; c++)
+      if (r != c) H[r][c] *= scale[r] * scale[c];
+}
+
 // Gradient jump of WARP_DELTA_STEP_GRAD_JUMP: re-renders *best_wm_params (the
 // step search leaves the prediction of its last rejected candidate in dst),
 // builds the quadratic model around it, and verifies the top-K predicted
 // lattice offsets. Adopts the best verified model if it improves *best_rd.
+// If `probes` is given (WARP_DELTA_STEP_GRAD_JUMP_MEASURED), the diagonal
+// curvature and the slope of the model are replaced by finite differences of
+// the measured RD costs (rate part removed) wherever both neighbours were
+// evaluated, and the gradient model's off-diagonal terms are rescaled so that
+// their normalized coupling H_rc / sqrt(H_rr H_cc) is preserved.
 // Returns 1 if a jump was adopted.
 static int warp_delta_grad_jump(const WarpRdlatCtx *ctx, const MV *center_mv,
-                                int max_cands,
+                                int max_cands, const WarpDeltaProbes *probes,
                                 WarpedMotionParams *best_wm_params,
                                 uint64_t *best_rd) {
-  const AV2_COMMON *const cm = ctx->cm;
-  MACROBLOCKD *xd = ctx->xd;
   MB_MODE_INFO *mbmi = ctx->mbmi;
   const SUBPEL_MOTION_SEARCH_PARAMS *ms_params = ctx->ms_params;
   WarpedMotionParams *params = &mbmi->wm_params[0];
-  const BLOCK_SIZE bsize = mbmi->sb_type[PLANE_TYPE_Y];
-  const int bw = block_size_wide[bsize];
-  const int bh = block_size_high[bsize];
   const int six_param = mbmi->six_param_warp_model_flag;
   const int n = six_param ? 4 : 2;
   const int step_size = ctx->step_size;
@@ -5821,17 +5865,10 @@ static int warp_delta_grad_jump(const WarpRdlatCtx *ctx, const MV *center_mv,
   const double lambda =
       (double)ctx->error_per_bit / (double)(1 << ctx->rd_shift);
 
-  *params = *best_wm_params;
-  compute_motion_cost(xd, cm, ms_params, bsize, &mbmi->mv[0].as_mv,
-                      ctx->can_refine_mv);
-
   const uint16_t *src = ms_params->var_params.ms_buffers.src->buf;
   const int src_stride = ms_params->var_params.ms_buffers.src->stride;
   double H[WARP_RDLAT_MAX_PARAMS][WARP_RDLAT_MAX_PARAMS];
   double g[WARP_RDLAT_MAX_PARAMS];
-  warp_rdlat_build_model(src, src_stride, xd->plane[0].dst.buf,
-                         xd->plane[0].dst.stride, bw, bh, six_param, step_size,
-                         xd->bd, H, g);
 
   int rate_tab[WARP_RDLAT_MAX_PARAMS][WARP_RDLAT_RATE_TAB_SIZE];
   warp_rdlat_init_rate_tab(ctx->mode_costs, n, max_coded_index, rate_tab);
@@ -5844,16 +5881,111 @@ static int warp_delta_grad_jump(const WarpRdlatCtx *ctx, const MV *center_mv,
     lo[r] = -max_coded_index - st0[r];
     hi[r] = max_coded_index - st0[r];
   }
+
+  // Measured diagonal / slope: with cost(d) = d' H d - 2 g' d, the measured
+  // distortion differences f(+1) = H_rr - 2 g_r and f(-1) = H_rr + 2 g_r give
+  // both directly. An axis is "measured" if both neighbours were evaluated
+  // and the cost is convex along it.
+  double hm[WARP_RDLAT_MAX_PARAMS] = { 0 }, gm[WARP_RDLAT_MAX_PARAMS] = { 0 };
+  int measured[WARP_RDLAT_MAX_PARAMS] = { 0 };
+  int num_measured = 0;
+  int num_evaluated = 0;
+  if (probes) {
+    for (int r = 0; r < n; r++) {
+      if (probes->rd[r][0] == UINT64_MAX || probes->rd[r][1] == UINT64_MAX)
+        continue;
+      const int c = st0[r] + max_coded_index;
+      if (c - 1 < 0 || c + 1 >= WARP_RDLAT_RATE_TAB_SIZE) continue;
+      num_evaluated++;
+      const double fp = (double)probes->rd[r][0] - (double)probes->rd_center -
+                        lambda * (rate_tab[r][c + 1] - rate_tab[r][c]);
+      const double fm = (double)probes->rd[r][1] - (double)probes->rd_center -
+                        lambda * (rate_tab[r][c - 1] - rate_tab[r][c]);
+      hm[r] = 0.5 * (fp + fm);
+      gm[r] = 0.25 * (fm - fp);
+      if (hm[r] > 0) measured[r] = 1, num_measured++;
+    }
+  }
+
+  // The image-gradient model is needed unless every axis is measured and the
+  // ROTZOOM cross term can be probed (below).
+  int have_gradient_model = 0;
+  if (num_measured < n) {
+    warp_delta_measured_model(ctx, src, src_stride, best_wm_params, hm, gm,
+                              measured, H, g);
+    have_gradient_model = 1;
+  } else {
+    for (int r = 0; r < n; r++) {
+      for (int c = 0; c < n; c++) H[r][c] = 0;
+      H[r][r] = hm[r];
+      g[r] = gm[r];
+    }
+  }
+
+  const WarpedMotionParams center_params = *best_wm_params;
+  int improved = 0;
+  int probe_d[WARP_RDLAT_MAX_PARAMS] = { 0 };
+  int have_probe = 0;
+  if (!six_param && num_evaluated == n) {
+    // ROTZOOM with both axes probed: one more probe on the diagonal in the
+    // descent direction gives the cross term exactly,
+    //   f(s) = H00 + H11 + 2 s0 s1 H01 - 2 (s0 g0 + s1 g1),
+    // so the whole 2-D model is built from rendered costs (the probe also
+    // serves as a verified candidate).
+    probe_d[0] = g[0] >= 0 ? 1 : -1;
+    probe_d[1] = g[1] >= 0 ? 1 : -1;
+    if (probe_d[0] >= lo[0] && probe_d[0] <= hi[0] && probe_d[1] >= lo[1] &&
+        probe_d[1] <= hi[1]) {
+      *params = center_params;
+      for (int r = 0; r < n; r++)
+        params->wmmat[2 + r] += probe_d[r] * step_size;
+      const uint64_t probe_rd = warp_rdlat_eval_model(ctx, center_mv);
+      if (probe_rd != UINT64_MAX) {
+        have_probe = 1;
+        if (probe_rd < *best_rd) {
+          *best_wm_params = *params;
+          *best_rd = probe_rd;
+          improved = 1;
+        }
+        const int c0 = st0[0] + max_coded_index;
+        const int c1 = st0[1] + max_coded_index;
+        const double f =
+            (double)probe_rd - (double)probes->rd_center -
+            lambda * ((rate_tab[0][c0 + probe_d[0]] - rate_tab[0][c0]) +
+                      (rate_tab[1][c1 + probe_d[1]] - rate_tab[1][c1]));
+        double h01 = (f - H[0][0] - H[1][1] +
+                      2.0 * (probe_d[0] * g[0] + probe_d[1] * g[1])) /
+                     (2.0 * probe_d[0] * probe_d[1]);
+        // Keep the model positive definite.
+        const double lim = 0.95 * sqrt(AVMMAX(H[0][0] * H[1][1], 0.0));
+        H[0][1] = H[1][0] = fclamp(h01, -lim, lim);
+      }
+    }
+  }
+  if (!have_probe && !have_gradient_model) {
+    // No cross term from the probe: fall back to the gradient model's.
+    warp_delta_measured_model(ctx, src, src_stride, best_wm_params, hm, gm,
+                              measured, H, g);
+  }
+
   static const int kZero[WARP_RDLAT_MAX_PARAMS] = { 0 };
   const double q0 =
       warp_rdlat_cost(H, g, kZero, n, rate_tab, st0, max_coded_index, lambda);
   WarpRdlatCand cands[WARP_RDLAT_MAX_CANDS];
-  const int num_cands =
+  int num_cands =
       warp_rdlat_collect_cands(H, g, n, rate_tab, st0, lo, hi, max_coded_index,
                                lambda, q0, max_cands, cands);
+  if (have_probe) {
+    // The probe point is already verified.
+    for (int k = 0; k < num_cands; k++) {
+      if (cands[k].d[0] == probe_d[0] && cands[k].d[1] == probe_d[1]) {
+        for (int j = k + 1; j < num_cands; j++) cands[j - 1] = cands[j];
+        num_cands--;
+        break;
+      }
+    }
+  }
 
-  const WarpedMotionParams center_params = *best_wm_params;
-  int improved = 0;
   for (int k = 0; k < num_cands; k++) {
     *params = center_params;
     for (int r = 0; r < n; r++)
@@ -6143,12 +6275,16 @@ int av2_pick_warp_delta(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
                                    prev_best_models, warp_param_stack);
     case WARP_DELTA_STEP_SEARCH:
     case WARP_DELTA_STEP_GRAD_JUMP:
+    case WARP_DELTA_STEP_GRAD_JUMP_MEASURED:
     default: break;
   }
   // Number of gradient jump proposals verified when the step search stalls
-  // (WARP_DELTA_STEP_GRAD_JUMP only).
+  // (WARP_DELTA_STEP_GRAD_JUMP[_MEASURED] only).
+  const int use_measured_jump_model =
+      inter_sf->warp_delta_search_method == WARP_DELTA_STEP_GRAD_JUMP_MEASURED;
   const int num_jump_cands =
-      inter_sf->warp_delta_search_method == WARP_DELTA_STEP_GRAD_JUMP
+      (inter_sf->warp_delta_search_method == WARP_DELTA_STEP_GRAD_JUMP ||
+       use_measured_jump_model)
           ? clamp(inter_sf->warp_delta_rdlat_num_cands, 1, WARP_RDLAT_MAX_CANDS)
           : 0;
   const AV2_COMMON *const cm = &cpi->common;
@@ -6298,6 +6434,7 @@ int av2_pick_warp_delta(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
   // Refine model, by making a few passes through the available
   // parameters and trying to increase/decrease them
 
+  WarpDeltaProbes probes;
   for (int iter = 0; iter < number_of_iterations; iter++) {
     int center_best_so_far = 1;
 
@@ -6310,6 +6447,11 @@ int av2_pick_warp_delta(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
       center_mv.as_mv = *best_mv;
     }
 
+    // The probes are only meaningful if the descent stalls, in which case all
+    // of them were measured around the same center.
+    for (int r = 0; r < WARP_RDLAT_MAX_PARAMS; r++)
+      probes.rd[r][0] = probes.rd[r][1] = UINT64_MAX;
+    probes.rd_center = best_rd;
     for (int param_index = 2;
          param_index < (mbmi->six_param_warp_model_flag ? 6 : 4);
          param_index++) {
@@ -6345,6 +6487,7 @@ int av2_pick_warp_delta(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
                                              RDDIV_BITS + AV2_PROB_COST_SHIFT -
                                                  RD_EPB_SHIFT +
                                                  PIXEL_TRANSFORM_ERROR_SCALE);
+        probes.rd[param_index - 2][d] = cand_rd;
 
         if (cand_rd < best_rd) {
           best_wm_params = *params;
@@ -6372,6 +6515,7 @@ int av2_pick_warp_delta(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
                                      RD_EPB_SHIFT + PIXEL_TRANSFORM_ERROR_SCALE,
                                  can_refine_mv };
       if (warp_delta_grad_jump(&ctx, &center_mv.as_mv, num_jump_cands,
+                               use_measured_jump_model ? &probes : NULL,
                                &best_wm_params, &best_rd))
         center_best_so_far = 0;
     }

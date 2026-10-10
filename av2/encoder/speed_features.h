@@ -79,6 +79,14 @@ typedef enum {
   // model and verifies its top-K lattice candidates as jump proposals; the
   // descent resumes from an adopted jump.
   WARP_DELTA_STEP_GRAD_JUMP = 4,
+  // As WARP_DELTA_STEP_GRAD_JUMP, but the jump model's diagonal curvature and
+  // slope are taken from the RD costs the stalled descent has just measured at
+  // the +/-1 neighbours of each parameter (the image-gradient model gets the
+  // step length wrong by 2-3x for small blocks). For ROTZOOM one extra probe
+  // on the diagonal supplies the cross term, so the model is built entirely
+  // from rendered costs; for AFFINE the gradient model's off-diagonal coupling
+  // is kept, rescaled to preserve its correlation structure.
+  WARP_DELTA_STEP_GRAD_JUMP_MEASURED = 5,
 } WARP_DELTA_SEARCH_METHOD;
 
 /* This enumeration defines when the rate control recode loop will be
