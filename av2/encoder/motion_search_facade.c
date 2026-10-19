@@ -244,8 +244,9 @@ void av2_single_motion_search(const AV2_COMP *const cpi, MACROBLOCK *x,
             FULLPEL_MV prev_smv = smv;
             MV prev_mv = get_mv_from_fullmv(&prev_smv);
             cur_mv.as_mv = prev_mv;
-            term = opfl_refine_fullpel_mv_one_sided(cm, xd, &full_ms_params,
-                                                    mbmi, &smv, &cur_mv, bsize);
+            term = opfl_refine_fullpel_mv_one_sided(
+                cm, xd, &full_ms_params, mbmi, &smv, &cur_mv, bsize,
+                cpi->oxcf.tool_cfg.opfl_mv_search_sad_thresh);
             if (term) break;
 
             FULLPEL_MV cur_fullmv = get_fullmv_from_mv(&cur_mv.as_mv);
@@ -489,8 +490,9 @@ void av2_single_motion_search_high_precision(const AV2_COMP *const cpi,
       FULLPEL_MV prev_fullmv = start_fullmv;
       MV prev_mv = get_mv_from_fullmv(&prev_fullmv);
       cur_mv.as_mv = prev_mv;
-      term = opfl_refine_fullpel_mv_one_sided(cm, xd, &full_ms_params, mbmi,
-                                              &start_fullmv, &cur_mv, bsize);
+      term = opfl_refine_fullpel_mv_one_sided(
+          cm, xd, &full_ms_params, mbmi, &start_fullmv, &cur_mv, bsize,
+          cpi->oxcf.tool_cfg.opfl_mv_search_sad_thresh);
       if (term) break;
 
       FULLPEL_MV cur_fullmv = get_fullmv_from_mv(&cur_mv.as_mv);

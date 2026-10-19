@@ -321,6 +321,10 @@ typedef struct cfg_options {
    * 1: screen content only, 2: all content
    */
   unsigned int enable_opfl_mv_search;
+  /*!\brief Optical flow based MV search: SAD-per-pixel threshold below which
+   * a block is not refined (0: never skip)
+   */
+  unsigned int opfl_mv_search_sad_thresh;
   /*!\brief enable block adaptive weighted prediction
    *
    */

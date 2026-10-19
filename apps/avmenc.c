@@ -289,6 +289,7 @@ const arg_def_t *av2_key_val_args[] = {
   &g_av2_codec_arg_defs.enable_global_motion,
   &g_av2_codec_arg_defs.enable_high_motion,
   &g_av2_codec_arg_defs.enable_opfl_mv_search,
+  &g_av2_codec_arg_defs.opfl_mv_search_sad_thresh,
   &g_av2_codec_arg_defs.enable_ibp,
   &g_av2_codec_arg_defs.enable_idtx_intra,
   &g_av2_codec_arg_defs.enable_imp_msk_bld,
@@ -560,6 +561,7 @@ static void init_config(cfg_options_t *config) {
   config->enable_mv_traj = 1;
   config->enable_high_motion = 0;
   config->enable_opfl_mv_search = 1;
+  config->opfl_mv_search_sad_thresh = 0;
   config->enable_tip_refinemv = 1;
   config->enable_bawp = 1;
   config->enable_cwp = 1;

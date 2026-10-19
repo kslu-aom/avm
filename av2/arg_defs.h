@@ -161,6 +161,7 @@ typedef struct av2_codec_arg_definitions {
   arg_def_t enable_mv_traj;
   arg_def_t enable_high_motion;
   arg_def_t enable_opfl_mv_search;
+  arg_def_t opfl_mv_search_sad_thresh;
   arg_def_t enable_bawp;
   arg_def_t enable_cwp;
   arg_def_t enable_imp_msk_bld;

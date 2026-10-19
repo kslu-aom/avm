@@ -134,6 +134,7 @@ struct av2_extracfg {
   int enable_mv_traj;       // enable MV trajectory tracking
   int enable_high_motion;   // Enable a large motion search window
   int enable_opfl_mv_search;  // optical flow MV search: 0 off, 1 SC, 2 all
+  int opfl_mv_search_sad_thresh;  // OMVS SAD/pel early-skip threshold
   int enable_bawp;          // enable block adaptive weighted prediction
   int enable_cwp;           // enable compound weighted prediction
   int enable_imp_msk_bld;   // enable implicit masked blending
@@ -480,6 +481,7 @@ static struct av2_extracfg default_extra_cfg = {
   1,    // enable mv trajectory tracking
   0,    // enable a large motion search window
   1,    // enable optical flow MV search (screen content)
+  0,    // optical flow MV search SAD/pel early-skip threshold (0 = never skip)
   1,    // enable block adaptive weighted prediction (BAWP)
   1,    // enable compound weighted prediction (CWP)
   1,    // eanble implicit masked blending
@@ -978,6 +980,7 @@ static void update_encoder_config(cfg_options_t *cfg,
   cfg->enable_mv_traj = extra_cfg->enable_mv_traj;
   cfg->enable_high_motion = extra_cfg->enable_high_motion;
   cfg->enable_opfl_mv_search = extra_cfg->enable_opfl_mv_search;
+  cfg->opfl_mv_search_sad_thresh = extra_cfg->opfl_mv_search_sad_thresh;
   cfg->enable_bawp = extra_cfg->enable_bawp;
   cfg->enable_cwp = extra_cfg->enable_cwp;
   cfg->enable_imp_msk_bld = extra_cfg->enable_imp_msk_bld;
@@ -1102,6 +1105,7 @@ static void update_default_encoder_config(const cfg_options_t *cfg,
   extra_cfg->enable_mv_traj = cfg->enable_mv_traj;
   extra_cfg->enable_high_motion = cfg->enable_high_motion;
   extra_cfg->enable_opfl_mv_search = cfg->enable_opfl_mv_search;
+  extra_cfg->opfl_mv_search_sad_thresh = cfg->opfl_mv_search_sad_thresh;
   extra_cfg->enable_bawp = cfg->enable_bawp;
   extra_cfg->enable_cwp = cfg->enable_cwp;
   extra_cfg->enable_imp_msk_bld = cfg->enable_imp_msk_bld;
@@ -1474,6 +1478,7 @@ static avm_codec_err_t set_encoder_config(AV2EncoderConfig *oxcf,
 
   tool_cfg->enable_high_motion = extra_cfg->enable_high_motion;
   tool_cfg->enable_opfl_mv_search = extra_cfg->enable_opfl_mv_search;
+  tool_cfg->opfl_mv_search_sad_thresh = extra_cfg->opfl_mv_search_sad_thresh;
 
   tool_cfg->enable_opfl_refine = extra_cfg->enable_opfl_refine;
   if (tool_cfg->enable_opfl_refine) {
@@ -4259,6 +4264,11 @@ static avm_codec_err_t encoder_set_option(avm_codec_alg_priv_t *ctx,
                                   argv, err_string)) {
     extra_cfg.enable_opfl_mv_search =
         avm_arg_parse_int_helper(&arg, err_string);
+  } else if (avm_arg_match_helper(
+                 &arg, &g_av2_codec_arg_defs.opfl_mv_search_sad_thresh, argv,
+                 err_string)) {
+    extra_cfg.opfl_mv_search_sad_thresh =
+        avm_arg_parse_int_helper(&arg, err_string);
   } else if (avm_arg_match_helper(&arg, &g_av2_codec_arg_defs.enable_bawp, argv,
                                   err_string)) {
     extra_cfg.enable_bawp = avm_arg_parse_int_helper(&arg, err_string);
@@ -4945,6 +4955,7 @@ static const avm_codec_enc_cfg_t encoder_usage_cfg[] = {
           1,  // MV traj
           0,  // enable_high_motion
           1,  // enable_opfl_mv_search
+          0,  // opfl_mv_search_sad_thresh
           1,    1,  1,   1,
           1,  // enable idtx intra for fsc is disabled case
           1,
@@ -5083,6 +5094,7 @@ static const avm_codec_enc_cfg_t encoder_usage_cfg[] = {
           1,  // MV traj
           0,  // enable_high_motion
           1,  // enable_opfl_mv_search
+          0,  // opfl_mv_search_sad_thresh
           1,    1,  1,   1,
           1,  // enable idtx intra for fsc is disabled case
           1,

@@ -273,7 +273,8 @@ int get_opfl_mv_iterations(const AV2_COMP *cpi, const MB_MODE_INFO *mbmi) {
 int opfl_refine_fullpel_mv_one_sided(
     const AV2_COMMON *cm, MACROBLOCKD *xd,
     const FULLPEL_MOTION_SEARCH_PARAMS *ms_params, MB_MODE_INFO *mbmi,
-    const FULLPEL_MV *const smv, int_mv *mv_refined, BLOCK_SIZE bsize) {
+    const FULLPEL_MV *const smv, int_mv *mv_refined, BLOCK_SIZE bsize,
+    int sad_thresh) {
   (void)cm;
   (void)xd;
   (void)mbmi;
@@ -285,10 +286,14 @@ int opfl_refine_fullpel_mv_one_sided(
   uint16_t *pred_ptr = &pred->buf[smv->row * pred->stride + smv->col];
 
 #if OMVS_EARLY_TERM
-  // Early termination based on SAD
-  // int sad = ms_params->vfp->sdf(dst0, bw, dst1, bw);
-  int sad = ms_params->vfp->sdf(src->buf, src->stride, pred_ptr, pred->stride);
-  if (sad < bw * bh * OMVS_SAD_THR) return 1;
+  // Early termination based on SAD (sad_thresh == 0: never)
+  if (sad_thresh > 0) {
+    const int sad =
+        ms_params->vfp->sdf(src->buf, src->stride, pred_ptr, pred->stride);
+    if (sad < bw * bh * sad_thresh) return 1;
+  }
+#else
+  (void)sad_thresh;
 #endif
 
   int vx0, vx1, vy0, vy1;

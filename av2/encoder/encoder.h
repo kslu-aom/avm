@@ -894,6 +894,8 @@ typedef struct {
   int enable_high_motion;
   // optical flow based MV search: 0: off, 1: screen content only, 2: all
   int enable_opfl_mv_search;
+  // optical flow MV search: SAD-per-pixel early-skip threshold (0: never)
+  int opfl_mv_search_sad_thresh;
   // enable block adaptive weighted prediction
   int enable_bawp;
   // enable compound weighted prediction

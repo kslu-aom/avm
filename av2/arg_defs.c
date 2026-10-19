@@ -445,6 +445,10 @@ const av2_codec_arg_definitions_t g_av2_codec_arg_defs = {
       ARG_DEF(NULL, "enable-opfl-mv-search", 1,
               "Enable optical flow based MV search "
               "(0: off, 1: screen content only (default), 2: all content)"),
+  .opfl_mv_search_sad_thresh = ARG_DEF(
+      NULL, "opfl-mv-search-sad-thresh", 1,
+      "Optical flow MV search: skip blocks whose SAD per pixel is below this "
+      "threshold (0: never skip (default), 8: legacy threshold)"),
   .enable_bawp = ARG_DEF(NULL, "enable-bawp", 1,
                          "Enable block adaptive weighted prediction (BAWP) "
                          "(0: false, 1: true (default))"),
