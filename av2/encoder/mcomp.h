@@ -545,6 +545,18 @@ typedef struct {
   int is_valid;
   int step_size;
   MB_MODE_INFO mbmi_stats;
+  WarpedMotionParams init_wm_params;
+  int_mv init_mv;
+  unsigned int init_sse;
+  unsigned int best_sse;
+  int best_rate;
+  uint64_t best_rd;
+  int has_init_hg4;
+  double H4_init[4][4];
+  double g4_init[4];
+  int has_best_hg;
+  double H_best[4][4];
+  double g_best[4];
 } warp_mode_info;
 
 typedef struct {

@@ -5428,7 +5428,7 @@ static int pick_warp_delta_gradient(
   }
 
   if (prev_best_models) {
-    warp_mode_info this_warp_stats;
+    warp_mode_info this_warp_stats = { 0 };
     this_warp_stats.is_valid = 1;
     this_warp_stats.step_size = step_size;
     this_warp_stats.prev_wm_params = best_wm_params;
@@ -5706,8 +5706,9 @@ static void warp_rdlat_insert_cand(WarpRdlatCand *cands, int max_cands,
 // Completes the warp model in mbmi->wm_params[0], whose non-translational
 // parameters have been set, renders its prediction, and returns its RD cost.
 // Returns UINT64_MAX if the model is not valid.
-static uint64_t warp_rdlat_eval_model(const WarpRdlatCtx *ctx,
-                                      const MV *center_mv) {
+static uint64_t warp_rdlat_eval_model_ex(const WarpRdlatCtx *ctx,
+                                         const MV *center_mv,
+                                         unsigned int *out_sse, int *out_rate) {
   MB_MODE_INFO *mbmi = ctx->mbmi;
   MACROBLOCKD *xd = ctx->xd;
   WarpedMotionParams *params = &mbmi->wm_params[0];
@@ -5727,8 +5728,15 @@ static uint64_t warp_rdlat_eval_model(const WarpRdlatCtx *ctx,
   const unsigned int sse =
       compute_motion_cost(xd, ctx->cm, ctx->ms_params, bsize,
                           &mbmi->mv[0].as_mv, ctx->can_refine_mv);
+  if (out_sse) *out_sse = sse;
+  if (out_rate) *out_rate = rate;
   return (uint64_t)sse + (uint64_t)ROUND_POWER_OF_TWO_64(
                              (int64_t)rate * ctx->error_per_bit, ctx->rd_shift);
+}
+
+static uint64_t warp_rdlat_eval_model(const WarpRdlatCtx *ctx,
+                                      const MV *center_mv) {
+  return warp_rdlat_eval_model_ex(ctx, center_mv, NULL, NULL);
 }
 
 // Collects into `cands` (at most max_cands, sorted by predicted RD cost) the
@@ -6000,10 +6008,32 @@ static int warp_delta_grad_jump(const WarpRdlatCtx *ctx, const MV *center_mv,
   return improved;
 }
 
+static INLINE int warp_non_trans_equal(const WarpedMotionParams *a,
+                                       const WarpedMotionParams *b) {
+  return a->wmmat[2] == b->wmmat[2] && a->wmmat[3] == b->wmmat[3] &&
+         a->wmmat[4] == b->wmmat[4] && a->wmmat[5] == b->wmmat[5];
+}
+
+static INLINE int warp_is_identity_params(const WarpedMotionParams *a) {
+  return a->wmmat[2] == (1 << WARPEDMODEL_PREC_BITS) && a->wmmat[3] == 0 &&
+         a->wmmat[4] == 0 && a->wmmat[5] == (1 << WARPEDMODEL_PREC_BITS);
+}
+
+static INLINE void warp_project_h4_to_h2(const double H4[4][4],
+                                         const double g4[4], double H2[4][4],
+                                         double g2[4]) {
+  H2[0][0] = H4[0][0] + 2.0 * H4[0][3] + H4[3][3];
+  H2[0][1] = H2[1][0] = (H4[0][1] + H4[1][3]) - (H4[0][2] + H4[2][3]);
+  H2[1][1] = H4[1][1] - 2.0 * H4[1][2] + H4[2][2];
+  g2[0] = g4[0] + g4[3];
+  g2[1] = g4[1] - g4[2];
+}
+
 // Warp delta search with the gradient quadratic model and the RD-regularized
 // lattice search described above (WARP_DELTA_GRADIENT_RDLAT). Each iteration
 // builds the model around the best model so far, verifies the best lattice
-// candidates, and refines the translational MV (WARP_NEWMV). Returns 1.
+// candidates, and refines the translational MV (WARP_NEWMV). Returns 1 if a
+// valid warp model is selected, 0 if pruned.
 static int pick_warp_delta_rdlat(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
                                  MB_MODE_INFO *mbmi,
                                  const SUBPEL_MOTION_SEARCH_PARAMS *ms_params,
@@ -6037,6 +6067,7 @@ static int pick_warp_delta_rdlat(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
   av2_get_warp_base_params(cm, mbmi, &base_params, &center_mv,
                            warp_param_stack);
   MV *best_mv = &mbmi->mv[0].as_mv;
+  const int_mv orig_mv = mbmi->mv[0];
 
   int step_size = 0;
   int max_coded_index = 0;
@@ -6045,13 +6076,16 @@ static int pick_warp_delta_rdlat(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
   const int max_warp_delta_value = step_size * max_coded_index;
   WarpedMotionParams start_params = base_params;
 
+  warp_mode_info cand_best_model = { 0 };
+  int has_cand_best_model = 0;
+
   // Warm start from the model selected at the previous warp precision, as in
   // the step search.
   if (enable_fast_model_search) {
-    warp_mode_info cand_best_model;
     if (get_valid_model_from_warp_stats_buffer(prev_best_models, mbmi,
                                                &cand_best_model) &&
         cand_best_model.is_valid) {
+      has_cand_best_model = 1;
       WarpedMotionParams prev_wm_params = cand_best_model.prev_wm_params;
       for (int param_index = 2; param_index < 2 + n; param_index++) {
         const int actual_delta =
@@ -6125,19 +6159,86 @@ static int pick_warp_delta_rdlat(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
   int rate_tab[WARP_RDLAT_MAX_PARAMS][WARP_RDLAT_RATE_TAB_SIZE];
   warp_rdlat_init_rate_tab(mode_costs, n, max_coded_index, rate_tab);
 
-  // Calculate the initial RD cost. This also renders the prediction around
-  // which the first quadratic model is built.
   av2_set_warp_translation(xd->mi_row, xd->mi_col, bsize, center_mv.as_mv,
                            params);
+  const WarpedMotionParams init_wm_params = *params;
+  const int_mv init_mv = mbmi->mv[0];
   WarpedMotionParams best_wm_params = *params;
   const int rate = warp_precision_idx_rate +
                    av2_cost_model_param(mbmi, mode_costs, step_size,
                                         max_coded_index, &base_params);
-  const unsigned int sse =
-      compute_motion_cost(xd, cm, ms_params, bsize, best_mv, can_refine_mv);
+  int best_rate = rate;
+
+  // Check if we can reuse the initial SSE and/or quadratic model (H, g) from a
+  // previous trial in prev_best_models.
+  int have_reused_sse = 0;
+  unsigned int sse = 0;
+  int have_reused_hg = 0;
+  double H_reused[WARP_RDLAT_MAX_PARAMS][WARP_RDLAT_MAX_PARAMS] = { { 0 } };
+  double g_reused[WARP_RDLAT_MAX_PARAMS] = { 0 };
+  int dst_is_best = 0;
+
+  if (has_cand_best_model &&
+      warp_non_trans_equal(&init_wm_params, &cand_best_model.prev_wm_params) &&
+      init_mv.as_int == cand_best_model.mbmi_stats.mv[0].as_int) {
+    sse = cand_best_model.best_sse;
+    have_reused_sse = 1;
+    if (cand_best_model.has_best_hg) {
+      const double scale =
+          (double)step_size / (double)cand_best_model.step_size;
+      const double scale2 = scale * scale;
+      for (int r = 0; r < n; r++) {
+        for (int c = 0; c < n; c++)
+          H_reused[r][c] = cand_best_model.H_best[r][c] * scale2;
+        g_reused[r] = cand_best_model.g_best[r] * scale;
+      }
+      have_reused_hg = 1;
+    }
+  } else if (!mbmi->warp_precision_idx && prev_best_models) {
+    warp_mode_info *queue = prev_best_models->warp_param_info;
+    const int start_idx = prev_best_models->model_start_idx;
+    const int count = prev_best_models->model_count;
+    for (int idx_bank = 0; idx_bank < count; ++idx_bank) {
+      const int idx =
+          (start_idx + count - 1 - idx_bank) % WARP_STATS_BUFFER_SIZE;
+      const warp_mode_info *info = &queue[idx];
+      if (!info->is_valid || info->step_size != step_size) continue;
+      if (info->init_mv.as_int == init_mv.as_int &&
+          warp_non_trans_equal(&info->init_wm_params, &init_wm_params)) {
+        sse = info->init_sse;
+        have_reused_sse = 1;
+        if (info->has_init_hg4) {
+          if (six_param) {
+            for (int r = 0; r < 4; r++) {
+              for (int c = 0; c < 4; c++) H_reused[r][c] = info->H4_init[r][c];
+              g_reused[r] = info->g4_init[r];
+            }
+          } else {
+            warp_project_h4_to_h2(info->H4_init, info->g4_init, H_reused,
+                                  g_reused);
+          }
+          have_reused_hg = 1;
+        }
+        break;
+      }
+    }
+  }
+
+  if (!have_reused_sse) {
+    sse = compute_motion_cost(xd, cm, ms_params, bsize, best_mv, can_refine_mv);
+    dst_is_best = 1;
+  }
+  const unsigned int init_sse = sse;
+  unsigned int best_sse = sse;
   uint64_t best_rd =
       (uint64_t)sse +
       (uint64_t)ROUND_POWER_OF_TWO_64((int64_t)rate * error_per_bit, rd_shift);
+  const uint64_t init_rd = best_rd;
+
+  if (has_cand_best_model && have_reused_sse &&
+      cand_best_model.best_rd < best_rd) {
+    best_rd = cand_best_model.best_rd;
+  }
 
   const uint16_t *src = ms_params->var_params.ms_buffers.src->buf;
   const int src_stride = ms_params->var_params.ms_buffers.src->stride;
@@ -6146,12 +6247,61 @@ static int pick_warp_delta_rdlat(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
   const int do_mv_refine =
       inter_sf->warp_delta_rdlat_mv_refine && can_refine_mv && !skip_mv_search;
 
+  int has_init_hg4 = 0;
+  double H4_init[4][4] = { { 0 } };
+  double g4_init[4] = { 0 };
+  int has_best_hg = 0;
+  double H_best[4][4] = { { 0 } };
+  double g_best[4] = { 0 };
+
   for (int iter = 0; iter < num_iters; iter++) {
-    // Here xd->plane[0].dst holds the prediction of best_wm_params.
-    double H[WARP_RDLAT_MAX_PARAMS][WARP_RDLAT_MAX_PARAMS];
-    double g[WARP_RDLAT_MAX_PARAMS];
-    warp_rdlat_build_model(src, src_stride, pred, pred_stride, bw, bh,
-                           six_param, step_size, xd->bd, H, g);
+    double H[WARP_RDLAT_MAX_PARAMS][WARP_RDLAT_MAX_PARAMS] = { { 0 } };
+    double g[WARP_RDLAT_MAX_PARAMS] = { 0 };
+    if (iter == 0 && have_reused_hg) {
+      for (int r = 0; r < n; r++) {
+        for (int c = 0; c < n; c++) H[r][c] = H_reused[r][c];
+        g[r] = g_reused[r];
+      }
+    } else {
+      if (!dst_is_best) {
+        *params = best_wm_params;
+        compute_motion_cost(xd, cm, ms_params, bsize, best_mv, can_refine_mv);
+        dst_is_best = 1;
+      }
+      if (iter == 0 && !mbmi->warp_precision_idx && mbmi->warp_ref_idx == 0) {
+        // Always build the 4-param affine normal equations on the first
+        // coarse trial so that a subsequent 4-param rotzoom trial at the same
+        // initial model can project (H4, g4) -> (H2, g2) without rendering or
+        // building gradients.
+        warp_rdlat_build_model(src, src_stride, pred, pred_stride, bw, bh, 1,
+                               step_size, xd->bd, H4_init, g4_init);
+        has_init_hg4 = 1;
+        if (six_param) {
+          for (int r = 0; r < 4; r++) {
+            for (int c = 0; c < 4; c++) H[r][c] = H4_init[r][c];
+            g[r] = g4_init[r];
+          }
+        } else {
+          warp_project_h4_to_h2(H4_init, g4_init, H, g);
+        }
+      } else {
+        warp_rdlat_build_model(src, src_stride, pred, pred_stride, bw, bh,
+                               six_param, step_size, xd->bd, H, g);
+        if (iter == 0 && six_param) {
+          for (int r = 0; r < 4; r++) {
+            for (int c = 0; c < 4; c++) H4_init[r][c] = H[r][c];
+            g4_init[r] = g[r];
+          }
+          has_init_hg4 = 1;
+        }
+      }
+    }
+
+    for (int r = 0; r < n; r++) {
+      for (int c = 0; c < n; c++) H_best[r][c] = H[r][c];
+      g_best[r] = g[r];
+    }
+    has_best_hg = 1;
 
     // Current coded indices, and the range of valid lattice offsets.
     int st0[WARP_RDLAT_MAX_PARAMS] = { 0 };
@@ -6166,56 +6316,77 @@ static int pick_warp_delta_rdlat(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
     static const int kZero[WARP_RDLAT_MAX_PARAMS] = { 0 };
     const double q0 =
         warp_rdlat_cost(H, g, kZero, n, rate_tab, st0, max_coded_index, lambda);
+    double q_thresh = q0;
+    if (iter == 0 && has_cand_best_model && have_reused_sse) {
+      const double q_coarse =
+          lambda * (double)(cand_best_model.best_rate - warp_precision_idx_rate);
+      if (q_coarse < q_thresh) q_thresh = q_coarse;
+    }
 
     // Collect the lattice points with the lowest predicted RD cost, among the
     // ones predicted to improve on the current model.
     WarpRdlatCand cands[WARP_RDLAT_MAX_CANDS];
     const int num_cands =
         warp_rdlat_collect_cands(H, g, n, rate_tab, st0, lo, hi,
-                                 max_coded_index, lambda, q0, max_cands, cands);
+                                 max_coded_index, lambda, q_thresh, max_cands,
+                                 cands);
 
     // Verify the candidates with real predictions. dst_is_best tracks whether
     // xd->plane[0].dst still holds the prediction of best_wm_params.
     int improved = 0;
-    int dst_is_best = 1;
+    const uint64_t iter_start_rd = (iter == 0) ? init_rd : best_rd;
     const WarpedMotionParams center_params = best_wm_params;
     for (int k = 0; k < num_cands; k++) {
+      if (improved && (q0 - cands[k].q) <= (double)(iter_start_rd - best_rd)) {
+        break;
+      }
       *params = center_params;
       for (int r = 0; r < n; r++)
         params->wmmat[2 + r] += cands[k].d[r] * step_size;
-      const uint64_t cand_rd = warp_rdlat_eval_model(&ctx, &center_mv.as_mv);
+      unsigned int cand_sse = 0;
+      int cand_rate = 0;
+      const uint64_t cand_rd = warp_rdlat_eval_model_ex(
+          &ctx, &center_mv.as_mv, &cand_sse, &cand_rate);
       if (cand_rd == UINT64_MAX) continue;  // Invalid model, nothing rendered
       if (cand_rd < best_rd) {
         best_wm_params = *params;
         best_rd = cand_rd;
+        best_sse = cand_sse;
+        best_rate = cand_rate;
         improved = 1;
         dst_is_best = 1;
+        has_best_hg = 0;
       } else {
         dst_is_best = 0;
       }
     }
 
-    // Refine the translational MV for the updated warp parameters.
-    if (do_mv_refine) {
+    // Refine the translational MV only when the lattice step improved the warp
+    // model (the initial translational MV was already refined by joint MV
+    // search).
+    if (do_mv_refine && improved) {
       const MV prev_mv = *best_mv;
+      const int mv_neighbors =
+          (inter_sf->warp_delta_rdlat_mv_refine >= 2) ? 4 : 8;
       *params = best_wm_params;
       refine_translational_mv(cm, xd, ms_params, mbmi, params, &base_params,
                               &best_wm_params, best_mv, warp_precision_idx_rate,
-                              mode_costs, step_size, max_coded_index, 8, 1,
-                              &best_rd);
+                              mode_costs, step_size, max_coded_index,
+                              mv_neighbors, 1, &best_rd);
       center_mv.as_mv = *best_mv;
-      if (best_mv->row != prev_mv.row || best_mv->col != prev_mv.col)
+      if (best_mv->row != prev_mv.row || best_mv->col != prev_mv.col) {
         improved = 1;
+        has_best_hg = 0;
+        const int64_t rate_rd = ROUND_POWER_OF_TWO_64(
+            (int64_t)best_rate * error_per_bit, rd_shift);
+        best_sse = (best_rd > (uint64_t)rate_rd)
+                       ? (unsigned int)(best_rd - (uint64_t)rate_rd)
+                       : 0;
+      }
       dst_is_best = 0;
     }
 
     if (!improved) break;
-    if (iter + 1 < num_iters && !dst_is_best) {
-      // Re-render the best model so that the next quadratic model is built
-      // around it.
-      *params = best_wm_params;
-      compute_motion_cost(xd, cm, ms_params, bsize, best_mv, can_refine_mv);
-    }
   }
 
   // Optional final +/-1 coordinate polish.
@@ -6228,26 +6399,68 @@ static int pick_warp_delta_rdlat(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
         if (abs(params->wmmat[param_index] - base_params.wmmat[param_index]) >
             max_warp_delta_value)
           continue;
-        const uint64_t cand_rd = warp_rdlat_eval_model(&ctx, &center_mv.as_mv);
+        unsigned int cand_sse = 0;
+        int cand_rate = 0;
+        const uint64_t cand_rd = warp_rdlat_eval_model_ex(
+            &ctx, &center_mv.as_mv, &cand_sse, &cand_rate);
         if (cand_rd < best_rd) {
           best_wm_params = *params;
           best_rd = cand_rd;
+          best_sse = cand_sse;
+          best_rate = cand_rate;
+          has_best_hg = 0;
         }
       }
     }
   }
 
+  mbmi->wm_params[0] = best_wm_params;
+
+  // Prune redundant downstream full-YUV prediction and transform search when:
+  // (a) the selected warp model is identity and MV is unchanged (already
+  //     covered by SIMPLE_TRANSLATION), or
+  // (b) at fine precision (prec=1), the model duplicates or fails to improve
+  //     upon the coarse-precision (prec=0) winner in cand_best_model.
+  int is_valid_trial = 1;
+  if (warp_is_identity_params(&best_wm_params) &&
+      mbmi->mv[0].as_int == orig_mv.as_int) {
+    is_valid_trial = 0;
+  } else if (mbmi->warp_precision_idx && has_cand_best_model) {
+    if (warp_non_trans_equal(&best_wm_params,
+                             &cand_best_model.prev_wm_params) &&
+        mbmi->mv[0].as_int == cand_best_model.mbmi_stats.mv[0].as_int) {
+      is_valid_trial = 0;
+    } else if (best_rd >= cand_best_model.best_rd) {
+      is_valid_trial = 0;
+    }
+  }
+
   if (prev_best_models) {
-    warp_mode_info this_warp_stats;
+    warp_mode_info this_warp_stats = { 0 };
     this_warp_stats.is_valid = 1;
     this_warp_stats.step_size = step_size;
     this_warp_stats.prev_wm_params = best_wm_params;
     this_warp_stats.mbmi_stats = *mbmi;
+    this_warp_stats.init_wm_params = init_wm_params;
+    this_warp_stats.init_mv = init_mv;
+    this_warp_stats.init_sse = init_sse;
+    this_warp_stats.best_sse = best_sse;
+    this_warp_stats.best_rate = best_rate;
+    this_warp_stats.best_rd = best_rd;
+    this_warp_stats.has_init_hg4 = has_init_hg4;
+    if (has_init_hg4) {
+      memcpy(this_warp_stats.H4_init, H4_init, sizeof(H4_init));
+      memcpy(this_warp_stats.g4_init, g4_init, sizeof(g4_init));
+    }
+    this_warp_stats.has_best_hg = has_best_hg;
+    if (has_best_hg) {
+      memcpy(this_warp_stats.H_best, H_best, sizeof(H_best));
+      memcpy(this_warp_stats.g_best, g_best, sizeof(g_best));
+    }
     update_warp_stats_buffer(&this_warp_stats, prev_best_models);
   }
 
-  mbmi->wm_params[0] = best_wm_params;
-  return 1;
+  return is_valid_trial;
 }
 
 // Returns 1 if able to select a good model, 0 if not

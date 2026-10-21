@@ -596,7 +596,8 @@ const av2_codec_arg_definitions_t g_av2_codec_arg_defs = {
   .warp_delta_rdlat_mv_refine =
       ARG_DEF(NULL, "warp-delta-rdlat-mv-refine", 1,
               "Warp delta RD-lattice search (method 3): refine translational "
-              "MV in WARP_NEWMV (0: off, 1: on, -1: default 1)"),
+              "MV in WARP_NEWMV (0: off, 1: 8-pt, 2: 4-pt diamond, -1: default "
+              "1)"),
   .warp_delta_rdlat_polish =
       ARG_DEF(NULL, "warp-delta-rdlat-polish", 1,
               "Warp delta RD-lattice search (method 3): final +/-1 polish "
