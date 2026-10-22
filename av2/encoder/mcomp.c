@@ -4717,7 +4717,215 @@ static const warp_search_config warp_search_info[WARP_SEARCH_METHODS] = {
       NEIGHBOR_MASK8(0, 0, 1, 1, 0, 1, 1, 1),
     },
   },
+  // WARP_SEARCH_RDLAT (handled by 2x2 spatial-gradient MV RD-lattice solver)
+  { 0 },
 };
+
+#define WARP_MV_RDLAT_MAX_CANDS 4
+
+typedef struct {
+  int d_col;
+  int d_row;
+  double q;
+} WarpMvRdlatCand;
+
+// Builds the 2x2 quadratic model (H_mv, g_mv) of the DC-removed prediction
+// error with respect to subpel MV steps (d_col, d_row) in units of
+// (1 << mv_shift), linearized around the warped prediction `pred`.
+static void warp_rdlat_build_mv_model(const uint16_t *src, int src_stride,
+                                      const uint16_t *pred, int pred_stride,
+                                      int bw, int bh, int mv_shift, int bd,
+                                      double H_mv[2][2], double g_mv[2]) {
+  int64_t A00 = 0, A01 = 0, A11 = 0;
+  int64_t b0 = 0, b1 = 0;
+  int64_t s0 = 0, s1 = 0, e_sum = 0;
+  const int j_step = (bh >= 16) ? 2 : 1;
+
+  for (int j = 0; j < bh; j += j_step) {
+    const uint16_t *pred_row = &pred[j * pred_stride];
+    const uint16_t *pred_row_prev = &pred[AVMMAX(0, j - 1) * pred_stride];
+    const uint16_t *pred_row_next = &pred[AVMMIN(bh - 1, j + 1) * pred_stride];
+    const uint16_t *src_row = &src[j * src_stride];
+    const int gy_mul = (j == 0 || j == bh - 1) ? 2 : 1;
+
+    {
+      const int gx = 2 * (pred_row[1] - pred_row[0]);
+      const int gy = gy_mul * (pred_row_next[0] - pred_row_prev[0]);
+      const int e = (int)pred_row[0] - (int)src_row[0];
+      A00 += (int64_t)gx * gx;
+      A01 += (int64_t)gx * gy;
+      A11 += (int64_t)gy * gy;
+      b0 -= (int64_t)e * gx;
+      b1 -= (int64_t)e * gy;
+      s0 += gx;
+      s1 += gy;
+      e_sum += e;
+    }
+    for (int i = 1; i < bw - 1; i++) {
+      const int gx = pred_row[i + 1] - pred_row[i - 1];
+      const int gy = gy_mul * (pred_row_next[i] - pred_row_prev[i]);
+      const int e = (int)pred_row[i] - (int)src_row[i];
+      A00 += (int64_t)gx * gx;
+      A01 += (int64_t)gx * gy;
+      A11 += (int64_t)gy * gy;
+      b0 -= (int64_t)e * gx;
+      b1 -= (int64_t)e * gy;
+      s0 += gx;
+      s1 += gy;
+      e_sum += e;
+    }
+    {
+      const int i = bw - 1;
+      const int gx = 2 * (pred_row[i] - pred_row[i - 1]);
+      const int gy = gy_mul * (pred_row_next[i] - pred_row_prev[i]);
+      const int e = (int)pred_row[i] - (int)src_row[i];
+      A00 += (int64_t)gx * gx;
+      A01 += (int64_t)gx * gy;
+      A11 += (int64_t)gy * gy;
+      b0 -= (int64_t)e * gx;
+      b1 -= (int64_t)e * gy;
+      s0 += gx;
+      s1 += gy;
+      e_sum += e;
+    }
+  }
+
+  const double num_pels = (double)(bw * (bh / j_step));
+  const double unit_mv = (double)(1 << mv_shift) / 8.0;
+  const double bd_scale = (double)j_step / (double)(1 << (2 * (bd - 8)));
+  const double h_scale = 0.25 * unit_mv * unit_mv * bd_scale;
+  const double g_scale = 0.5 * unit_mv * bd_scale;
+
+  H_mv[0][0] = ((double)A00 - (double)s0 * (double)s0 / num_pels) * h_scale;
+  H_mv[0][1] = H_mv[1][0] =
+      ((double)A01 - (double)s0 * (double)s1 / num_pels) * h_scale;
+  H_mv[1][1] = ((double)A11 - (double)s1 * (double)s1 / num_pels) * h_scale;
+  g_mv[0] = ((double)b0 + (double)s0 * (double)e_sum / num_pels) * g_scale;
+  g_mv[1] = ((double)b1 + (double)s1 * (double)e_sum / num_pels) * g_scale;
+}
+
+static void warp_rdlat_insert_mv_cand(
+    const double H_mv[2][2], const double g_mv[2], const MV *base_mv,
+    int base_mv_cost, int mv_shift, int max_radius, int use_amvd,
+    const SUBPEL_MOTION_SEARCH_PARAMS *ms_params, int compute_mvcost, int d_col,
+    int d_row, int max_cands, WarpMvRdlatCand *cands, int *num_cands) {
+  if (d_col == 0 && d_row == 0) return;
+  if (abs(d_col) > max_radius || abs(d_row) > max_radius) return;
+  for (int k = 0; k < *num_cands; k++) {
+    if (cands[k].d_col == d_col && cands[k].d_row == d_row) return;
+  }
+  const MV this_mv = { base_mv->row + d_row * (1 << mv_shift),
+                       base_mv->col + d_col * (1 << mv_shift) };
+  if (use_amvd) {
+    const MV diff_mv = { this_mv.row - ms_params->mv_cost_params.ref_mv->row,
+                         this_mv.col - ms_params->mv_cost_params.ref_mv->col };
+    if (!check_mvd_valid_amvd(diff_mv)) return;
+  }
+  if (!av2_is_subpelmv_in_range(&ms_params->mv_limits, this_mv)) return;
+
+  const double dist =
+      (double)d_col *
+          (H_mv[0][0] * d_col + 2.0 * H_mv[0][1] * d_row - 2.0 * g_mv[0]) +
+      (double)d_row * (H_mv[1][1] * d_row - 2.0 * g_mv[1]);
+  const int rate_diff =
+      compute_mvcost ? ((int)mv_err_cost(this_mv, &ms_params->mv_cost_params) -
+                        base_mv_cost)
+                     : 0;
+  const double q = dist + (double)rate_diff;
+  if (q >= 0.0) return;
+  if (*num_cands == max_cands && q >= cands[max_cands - 1].q) return;
+
+  int pos = *num_cands;
+  if (pos == max_cands) {
+    pos--;
+  } else {
+    (*num_cands)++;
+  }
+  while (pos > 0 && cands[pos - 1].q > q) {
+    cands[pos] = cands[pos - 1];
+    pos--;
+  }
+  cands[pos].d_col = d_col;
+  cands[pos].d_row = d_row;
+  cands[pos].q = q;
+}
+
+static int warp_rdlat_collect_mv_cands(
+    const double H_mv[2][2], const double g_mv[2], const MV *base_mv,
+    int mv_shift, int max_radius, int use_amvd,
+    const SUBPEL_MOTION_SEARCH_PARAMS *ms_params, int compute_mvcost,
+    int max_cands, WarpMvRdlatCand *cands) {
+  int num_cands = 0;
+  const int base_mv_cost =
+      compute_mvcost ? (int)mv_err_cost(*base_mv, &ms_params->mv_cost_params)
+                     : 0;
+  const double tr = H_mv[0][0] + H_mv[1][1];
+  const double eps = 1e-4 * tr + 1e-6;
+  const double h00 = H_mv[0][0] + eps;
+  const double h11 = H_mv[1][1] + eps;
+  const double h01 = H_mv[0][1];
+  const double det = h00 * h11 - h01 * h01;
+  double u_col = 0.0, u_row = 0.0;
+  if (det > 1e-6) {
+    u_col = (h11 * g_mv[0] - h01 * g_mv[1]) / det;
+    u_row = (h00 * g_mv[1] - h01 * g_mv[0]) / det;
+  } else {
+    if (h00 > 1e-6) u_col = g_mv[0] / h00;
+    if (h11 > 1e-6) u_row = g_mv[1] / h11;
+  }
+  const int c_col = clamp((int)llround(fclamp(u_col, -max_radius, max_radius)),
+                          -max_radius, max_radius);
+  const int c_row = clamp((int)llround(fclamp(u_row, -max_radius, max_radius)),
+                          -max_radius, max_radius);
+
+  // 1. 3x3 lattice neighborhood around the unconstrained continuous minimum.
+  for (int dr = -1; dr <= 1; dr++) {
+    for (int dc = -1; dc <= 1; dc++) {
+      warp_rdlat_insert_mv_cand(H_mv, g_mv, base_mv, base_mv_cost, mv_shift,
+                                max_radius, use_amvd, ms_params, compute_mvcost,
+                                c_col + dc, c_row + dr, max_cands, cands,
+                                &num_cands);
+    }
+  }
+  // 2. Half-step damped neighborhood when the jump is >= 2 steps.
+  if (abs(c_col) >= 2 || abs(c_row) >= 2) {
+    const int h_col = c_col / 2;
+    const int h_row = c_row / 2;
+    for (int dr = -1; dr <= 1; dr++) {
+      for (int dc = -1; dc <= 1; dc++) {
+        warp_rdlat_insert_mv_cand(H_mv, g_mv, base_mv, base_mv_cost, mv_shift,
+                                  max_radius, use_amvd, ms_params,
+                                  compute_mvcost, h_col + dc, h_row + dr,
+                                  max_cands, cands, &num_cands);
+      }
+    }
+  }
+  // 3. Immediate 3x3 neighborhood around (0, 0) and 1D coordinate optima.
+  for (int dr = -1; dr <= 1; dr++) {
+    for (int dc = -1; dc <= 1; dc++) {
+      warp_rdlat_insert_mv_cand(H_mv, g_mv, base_mv, base_mv_cost, mv_shift,
+                                max_radius, use_amvd, ms_params, compute_mvcost,
+                                dc, dr, max_cands, cands, &num_cands);
+    }
+  }
+  if (h00 > 1e-6) {
+    const int d0 =
+        clamp((int)llround(fclamp(g_mv[0] / h00, -max_radius, max_radius)),
+              -max_radius, max_radius);
+    warp_rdlat_insert_mv_cand(H_mv, g_mv, base_mv, base_mv_cost, mv_shift,
+                              max_radius, use_amvd, ms_params, compute_mvcost,
+                              d0, 0, max_cands, cands, &num_cands);
+  }
+  if (h11 > 1e-6) {
+    const int d1 =
+        clamp((int)llround(fclamp(g_mv[1] / h11, -max_radius, max_radius)),
+              -max_radius, max_radius);
+    warp_rdlat_insert_mv_cand(H_mv, g_mv, base_mv, base_mv_cost, mv_shift,
+                              max_radius, use_amvd, ms_params, compute_mvcost,
+                              0, d1, max_cands, cands, &num_cands);
+  }
+  return num_cands;
+}
 
 // Refines MV in a small range
 unsigned int av2_refine_warped_mv(MACROBLOCKD *xd, const AV2_COMMON *const cm,
@@ -4727,7 +4935,6 @@ unsigned int av2_refine_warped_mv(MACROBLOCKD *xd, const AV2_COMMON *const cm,
                                   int8_t ref, WARP_SEARCH_METHOD search_method,
                                   int num_iterations) {
   MB_MODE_INFO *mbmi = xd->mi[0];
-
   const MV *neighbors = warp_search_info[search_method].neighbors;
   const int num_neighbors = warp_search_info[search_method].num_neighbors;
   const uint8_t *neighbor_mask = warp_search_info[search_method].neighbor_mask;
@@ -4749,6 +4956,54 @@ unsigned int av2_refine_warped_mv(MACROBLOCKD *xd, const AV2_COMMON *const cm,
   int pts[SAMPLES_ARRAY_SIZE], pts_inref[SAMPLES_ARRAY_SIZE];
   const int mi_row = xd->mi_row;
   const int mi_col = xd->mi_col;
+
+  if (search_method == WARP_SEARCH_RDLAT && num_iterations > 0) {
+    const int bw = block_size_wide[bsize];
+    const int bh = block_size_high[bsize];
+    const uint16_t *src = ms_params->var_params.ms_buffers.src->buf;
+    const int src_stride = ms_params->var_params.ms_buffers.src->stride;
+    const uint16_t *pred = xd->plane[0].dst.buf;
+    const int pred_stride = xd->plane[0].dst.stride;
+    const int max_iters = AVMMAX(1, AVMMIN(2, num_iterations));
+    const int max_cands = 2;
+    for (int ite = 0; ite < max_iters; ++ite) {
+      double H_mv[2][2], g_mv[2];
+      warp_rdlat_build_mv_model(src, src_stride, pred, pred_stride, bw, bh,
+                                mv_shift, xd->bd, H_mv, g_mv);
+      WarpMvRdlatCand cands[WARP_MV_RDLAT_MAX_CANDS];
+      const int num_cands = warp_rdlat_collect_mv_cands(
+          H_mv, g_mv, best_mv, mv_shift, 8, mbmi->use_amvd, ms_params, 1,
+          max_cands, cands);
+      int improved = 0;
+      int jump_step = 0;
+      for (int k = 0; k < num_cands; ++k) {
+        const MV this_mv = { best_mv->row + cands[k].d_row * (1 << mv_shift),
+                             best_mv->col + cands[k].d_col * (1 << mv_shift) };
+        memcpy(pts, pts0, total_samples * 2 * sizeof(*pts0));
+        memcpy(pts_inref, pts_inref0, total_samples * 2 * sizeof(*pts_inref0));
+        if (total_samples > 1) mbmi->num_proj_ref[ref] = total_samples;
+        av2_find_projection(
+            mbmi->num_proj_ref[ref], pts, pts_inref, bsize, this_mv,
+            &mbmi->wm_params[ref], mi_row, mi_col,
+            get_ref_scale_factors((AV2_COMMON *const)cm, mbmi->ref_frame[ref]));
+        const unsigned int thismse =
+            compute_motion_cost(xd, cm, ms_params, bsize, &this_mv, 1);
+        if (thismse < bestmse) {
+          *best_mv = this_mv;
+          best_wm_params = mbmi->wm_params[ref];
+          best_num_proj_ref = mbmi->num_proj_ref[ref];
+          bestmse = thismse;
+          improved = 1;
+          jump_step = (abs(cands[k].d_col) >= 2 || abs(cands[k].d_row) >= 2);
+          break;
+        }
+      }
+      if (!improved || !jump_step) break;
+    }
+    mbmi->wm_params[ref] = best_wm_params;
+    mbmi->num_proj_ref[ref] = best_num_proj_ref;
+    return bestmse;
+  }
 
   // First iteration always scans all neighbors
   uint8_t valid_neighbors = UINT8_MAX;
@@ -5611,7 +5866,8 @@ static void warp_rdlat_build_model(
   int64_t s[WARP_RDLAT_MAX_PARAMS] = { 0 };
   int64_t e_sum = 0;
 
-  for (int j = 0; j < bh; j++) {
+  const int j_step = (bh >= 16) ? 2 : 1;
+  for (int j = 0; j < bh; j += j_step) {
     const int dy = j - center_y;
     const uint16_t *pred_row = &pred[j * pred_stride];
     const uint16_t *pred_row_prev = &pred[AVMMAX(0, j - 1) * pred_stride];
@@ -5631,9 +5887,9 @@ static void warp_rdlat_build_model(
   // Eliminate the DC offset of the error (the variance is invariant to it)
   // with the Schur complement, undo the gradient scaling, and convert from real
   // parameter units to coded index units.
-  const double num_pels = (double)(bw * bh);
+  const double num_pels = (double)(bw * (bh / j_step));
   const double unit = (double)step_size / (double)(1 << WARPEDMODEL_PREC_BITS);
-  const double bd_scale = 1.0 / (double)(1 << (2 * (bd - 8)));
+  const double bd_scale = (double)j_step / (double)(1 << (2 * (bd - 8)));
   const double h_scale = 0.25 * unit * unit * bd_scale;
   const double g_scale = 0.5 * unit * bd_scale;
   for (int r = 0; r < n; r++) {
@@ -6334,6 +6590,11 @@ static int pick_warp_delta_rdlat(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
     // Verify the candidates with real predictions. dst_is_best tracks whether
     // xd->plane[0].dst still holds the prediction of best_wm_params.
     int improved = 0;
+    double H_mv_best[2][2] = { { 0 } };
+    double g_mv_best[2] = { 0 };
+    int has_mv_best_hg = 0;
+    const int mv_shift = (MV_PRECISION_ONE_EIGHTH_PEL -
+                          ms_params->mv_cost_params.pb_mv_precision);
     const uint64_t iter_start_rd = (iter == 0) ? init_rd : best_rd;
     const WarpedMotionParams center_params = best_wm_params;
     for (int k = 0; k < num_cands; k++) {
@@ -6356,6 +6617,11 @@ static int pick_warp_delta_rdlat(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
         improved = 1;
         dst_is_best = 1;
         has_best_hg = 0;
+        if (do_mv_refine) {
+          warp_rdlat_build_mv_model(src, src_stride, pred, pred_stride, bw, bh,
+                                    mv_shift, xd->bd, H_mv_best, g_mv_best);
+          has_mv_best_hg = 1;
+        }
       } else {
         dst_is_best = 0;
       }
@@ -6364,26 +6630,41 @@ static int pick_warp_delta_rdlat(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
     // Refine the translational MV only when the lattice step improved the warp
     // model (the initial translational MV was already refined by joint MV
     // search).
-    if (do_mv_refine && improved) {
+    if (do_mv_refine && improved && has_mv_best_hg) {
       const MV prev_mv = *best_mv;
-      const int mv_neighbors =
-          (inter_sf->warp_delta_rdlat_mv_refine >= 2) ? 4 : 8;
       *params = best_wm_params;
-      refine_translational_mv(cm, xd, ms_params, mbmi, params, &base_params,
-                              &best_wm_params, best_mv, warp_precision_idx_rate,
-                              mode_costs, step_size, max_coded_index,
-                              mv_neighbors, 1, &best_rd);
+      WarpMvRdlatCand mv_cands[WARP_MV_RDLAT_MAX_CANDS];
+      const int num_mv_cands = warp_rdlat_collect_mv_cands(
+          H_mv_best, g_mv_best, best_mv, mv_shift, 2, mbmi->use_amvd, ms_params,
+          1, 1, mv_cands);
+      const int64_t rate_rd =
+          ROUND_POWER_OF_TWO_64((int64_t)best_rate * error_per_bit, rd_shift);
+      for (int kmv = 0; kmv < num_mv_cands; ++kmv) {
+        const MV this_mv = {
+          prev_mv.row + mv_cands[kmv].d_row * (1 << mv_shift),
+          prev_mv.col + mv_cands[kmv].d_col * (1 << mv_shift)
+        };
+        av2_set_warp_translation(xd->mi_row, xd->mi_col, bsize, this_mv,
+                                 params);
+        const unsigned int this_sse =
+            compute_motion_cost(xd, cm, ms_params, bsize, &this_mv, 1);
+        const uint64_t this_rd = (uint64_t)this_sse + (uint64_t)rate_rd;
+        if (this_rd < best_rd) {
+          *best_mv = this_mv;
+          best_wm_params = *params;
+          best_rd = this_rd;
+          best_sse = this_sse;
+          dst_is_best = 1;
+          break;
+        } else {
+          dst_is_best = 0;
+        }
+      }
       center_mv.as_mv = *best_mv;
       if (best_mv->row != prev_mv.row || best_mv->col != prev_mv.col) {
         improved = 1;
         has_best_hg = 0;
-        const int64_t rate_rd = ROUND_POWER_OF_TWO_64(
-            (int64_t)best_rate * error_per_bit, rd_shift);
-        best_sse = (best_rd > (uint64_t)rate_rd)
-                       ? (unsigned int)(best_rd - (uint64_t)rate_rd)
-                       : 0;
       }
-      dst_is_best = 0;
     }
 
     if (!improved) break;
@@ -6432,6 +6713,29 @@ static int pick_warp_delta_rdlat(const struct AV2_COMP *cpi, MACROBLOCKD *xd,
       is_valid_trial = 0;
     } else if (best_rd >= cand_best_model.best_rd) {
       is_valid_trial = 0;
+    }
+  }
+  if (is_valid_trial && prev_best_models && prev_best_models->model_count > 0) {
+    uint64_t min_prev_rd = UINT64_MAX;
+    const int start_idx = prev_best_models->model_start_idx;
+    const int count = prev_best_models->model_count;
+    for (int idx_bank = 0; idx_bank < count; ++idx_bank) {
+      const int idx =
+          (start_idx + count - 1 - idx_bank) % WARP_STATS_BUFFER_SIZE;
+      const warp_mode_info *info = &prev_best_models->warp_param_info[idx];
+      if (!info->is_valid) continue;
+      if (warp_non_trans_equal(&best_wm_params, &info->prev_wm_params) &&
+          mbmi->mv[0].as_int == info->mbmi_stats.mv[0].as_int &&
+          best_rd >= info->best_rd) {
+        is_valid_trial = 0;
+        break;
+      }
+      if (info->best_rd < min_prev_rd) min_prev_rd = info->best_rd;
+    }
+    if (is_valid_trial && min_prev_rd < UINT64_MAX) {
+      if (best_rd > min_prev_rd + (min_prev_rd >> 3)) {
+        is_valid_trial = 0;
+      }
     }
   }
 
@@ -6783,7 +7087,7 @@ int av2_refine_mv_for_base_param_warp_model(
   params->invalid = 0;
 
   // parameters are valid however, mv refinement is not supported
-  if (!can_refine_mv) return 1;  // returning 1 means valid model is found
+  if (!can_refine_mv || num_iterations <= 0) return 1;
 
   WarpedMotionParams best_wm_params;
   int sse;
@@ -6803,12 +7107,52 @@ int av2_refine_mv_for_base_param_warp_model(
   sse = compute_motion_cost(xd, cm, ms_params, bsize, best_mv, can_refine_mv);
   best_rd = sse;
 
+  if (search_method == WARP_SEARCH_RDLAT) {
+    const int bw = block_size_wide[bsize];
+    const int bh = block_size_high[bsize];
+    const uint16_t *src = ms_params->var_params.ms_buffers.src->buf;
+    const int src_stride = ms_params->var_params.ms_buffers.src->stride;
+    const uint16_t *pred = xd->plane[0].dst.buf;
+    const int pred_stride = xd->plane[0].dst.stride;
+    const int max_iters = AVMMAX(1, AVMMIN(2, num_iterations));
+    const int max_cands = 2;
+    for (int ite = 0; ite < max_iters; ++ite) {
+      double H_mv[2][2], g_mv[2];
+      warp_rdlat_build_mv_model(src, src_stride, pred, pred_stride, bw, bh,
+                                mv_shift, xd->bd, H_mv, g_mv);
+      WarpMvRdlatCand cands[WARP_MV_RDLAT_MAX_CANDS];
+      const int num_cands = warp_rdlat_collect_mv_cands(
+          H_mv, g_mv, best_mv, mv_shift, 8, mbmi->use_amvd, ms_params,
+          can_refine_mv, max_cands, cands);
+      int improved = 0;
+      int jump_step = 0;
+      for (int k = 0; k < num_cands; ++k) {
+        const MV this_mv = { best_mv->row + cands[k].d_row * (1 << mv_shift),
+                             best_mv->col + cands[k].d_col * (1 << mv_shift) };
+        av2_set_warp_translation(mi_row, mi_col, bsize, this_mv, params);
+        const unsigned int this_sse = compute_motion_cost(
+            xd, cm, ms_params, bsize, &this_mv, can_refine_mv);
+        if (this_sse < best_rd) {
+          *best_mv = this_mv;
+          center_mv.as_mv = *best_mv;
+          best_wm_params = *params;
+          best_rd = this_sse;
+          improved = 1;
+          jump_step = (abs(cands[k].d_col) >= 2 || abs(cands[k].d_row) >= 2);
+          break;
+        }
+      }
+      if (!improved || !jump_step) break;
+    }
+    mbmi->wm_params[0] = best_wm_params;
+    return 1;
+  }
+
   // First iteration always scans all neighbors
   uint8_t valid_neighbors = UINT8_MAX;
 
   for (int ite = 0; ite < num_iterations; ++ite) {
     int best_idx = -1;
-    *params = base_params;  // best_wm_params;
 
     for (int idx = 0; idx < num_neighbors; ++idx) {
       if ((valid_neighbors & (1 << idx)) == 0) {
@@ -6826,10 +7170,10 @@ int av2_refine_mv_for_base_param_warp_model(
 
       if (av2_is_subpelmv_in_range(mv_limits, this_mv)) {
         // Update model and costs according to the motion vector which
-        // is being tried out this iteration
+        // is being tried out this iteration. Note that av2_set_warp_translation
+        // only updates wmmat[0..1], so the shear parameters computed above for
+        // base_params remain valid throughout the loop.
         av2_set_warp_translation(mi_row, mi_col, bsize, this_mv, params);
-        av2_get_shear_params(
-            params, get_ref_scale_factors_const(cm, mbmi->ref_frame[0]));
 
         unsigned int this_sse = compute_motion_cost(xd, cm, ms_params, bsize,
                                                     &this_mv, can_refine_mv);
@@ -6868,7 +7212,6 @@ void av2_refine_mv_for_warp_extend(const AV2_COMMON *cm, MACROBLOCKD *xd,
                                    WARP_SEARCH_METHOD search_method,
                                    int num_iterations) {
   MB_MODE_INFO *mbmi = xd->mi[0];
-
   const MV *neighbors = warp_search_info[search_method].neighbors;
   const int num_neighbors = warp_search_info[search_method].num_neighbors;
   const uint8_t *neighbor_mask = warp_search_info[search_method].neighbor_mask;
@@ -6890,6 +7233,50 @@ void av2_refine_mv_for_warp_extend(const AV2_COMMON *cm, MACROBLOCKD *xd,
 
   const int mi_row = xd->mi_row;
   const int mi_col = xd->mi_col;
+
+  if (search_method == WARP_SEARCH_RDLAT && num_iterations > 0) {
+    const int bw = block_size_wide[bsize];
+    const int bh = block_size_high[bsize];
+    const uint16_t *src = ms_params->var_params.ms_buffers.src->buf;
+    const int src_stride = ms_params->var_params.ms_buffers.src->stride;
+    const uint16_t *pred = xd->plane[0].dst.buf;
+    const int pred_stride = xd->plane[0].dst.stride;
+    const int max_iters = AVMMAX(1, AVMMIN(2, num_iterations));
+    const int max_cands = 2;
+    for (int ite = 0; ite < max_iters; ++ite) {
+      double H_mv[2][2], g_mv[2];
+      warp_rdlat_build_mv_model(src, src_stride, pred, pred_stride, bw, bh,
+                                mv_shift, xd->bd, H_mv, g_mv);
+      WarpMvRdlatCand cands[WARP_MV_RDLAT_MAX_CANDS];
+      const int num_cands = warp_rdlat_collect_mv_cands(
+          H_mv, g_mv, best_mv, mv_shift, 8, mbmi->use_amvd, ms_params, 1,
+          max_cands, cands);
+      int improved = 0;
+      int jump_step = 0;
+      for (int k = 0; k < num_cands; ++k) {
+        const MV this_mv = { best_mv->row + cands[k].d_row * (1 << mv_shift),
+                             best_mv->col + cands[k].d_col * (1 << mv_shift) };
+        if (!av2_extend_warp_model(
+                neighbor_is_above, bsize, &this_mv, mi_row, mi_col,
+                neighbor_params, &mbmi->wm_params[0],
+                get_ref_scale_factors_const(cm, mbmi->ref_frame[0]))) {
+          const unsigned int thismse =
+              compute_motion_cost(xd, cm, ms_params, bsize, &this_mv, 1);
+          if (thismse < bestmse) {
+            *best_mv = this_mv;
+            best_wm_params = mbmi->wm_params[0];
+            bestmse = thismse;
+            improved = 1;
+            jump_step = (abs(cands[k].d_col) >= 2 || abs(cands[k].d_row) >= 2);
+            break;
+          }
+        }
+      }
+      if (!improved || !jump_step) break;
+    }
+    mbmi->wm_params[0] = best_wm_params;
+    return;
+  }
 
   // First iteration always scans all neighbors
   uint8_t valid_neighbors = UINT8_MAX;

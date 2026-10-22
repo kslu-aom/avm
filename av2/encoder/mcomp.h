@@ -172,6 +172,8 @@ enum {
   WARP_SEARCH_DIAMOND,
   // Search 8 adjacent points in a square at each iteration
   WARP_SEARCH_SQUARE,
+  // Spatial-gradient 2x2 RD-lattice MV refinement
+  WARP_SEARCH_RDLAT,
   WARP_SEARCH_METHODS
 } UENUM1BYTE(WARP_SEARCH_METHOD);
 

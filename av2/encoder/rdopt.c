@@ -2625,6 +2625,11 @@ static AVM_INLINE int handle_warp_delta_mode(
             .proj_type == PROJ_DEFAULT)
       return -1;
     // search MVD if mbmi->warpmv_with_mvd_flag is used.
+    const bool use_rdlat_base_mv =
+        cpi->sf.inter_sf.warp_delta_search_method ==
+            WARP_DELTA_GRADIENT_RDLAT &&
+        cpi->sf.inter_sf.warp_delta_rdlat_mv_refine >= 1;
+    int skip_base_refine = 0;
     if (mbmi->mode == WARPMV && mbmi->warpmv_with_mvd_flag) {
       if (previous_mvs[mbmi->warp_ref_idx].as_int == INVALID_MV) {
         int tmp_trans_ratemv = 0;
@@ -2633,13 +2638,23 @@ static AVM_INLINE int handle_warp_delta_mode(
         previous_mvs[mbmi->warp_ref_idx].as_int = mbmi->mv[0].as_int;
       } else {
         mbmi->mv[0].as_int = previous_mvs[mbmi->warp_ref_idx].as_int;
+        if (use_rdlat_base_mv) skip_base_refine = 1;
       }
     }
-    if (!cpi->sf.inter_sf.enable_six_param_warp_in_winner_mode ||
-        !eval_motion_mode)
+    const bool skip_winner_base =
+        cpi->sf.inter_sf.enable_six_param_warp_in_winner_mode &&
+        eval_motion_mode != 0;
+    if (!skip_winner_base) {
       valid = av2_refine_mv_for_base_param_warp_model(
-          cm, xd, mbmi, mbmi_ext, &ms_params, cpi->sf.mv_sf.warp_search_method,
-          cpi->sf.mv_sf.warp_search_iters);
+          cm, xd, mbmi, mbmi_ext, &ms_params,
+          use_rdlat_base_mv ? WARP_SEARCH_RDLAT
+                            : cpi->sf.mv_sf.warp_search_method,
+          skip_base_refine ? 0 : cpi->sf.mv_sf.warp_search_iters);
+      if (use_rdlat_base_mv && mbmi->mode == WARPMV &&
+          mbmi->warpmv_with_mvd_flag) {
+        previous_mvs[mbmi->warp_ref_idx].as_int = mbmi->mv[0].as_int;
+      }
+    }
   } else {
     mbmi->six_param_warp_model_flag = get_default_six_param_flag(cm, mbmi);
     const int six_param_enabled_by_tid =

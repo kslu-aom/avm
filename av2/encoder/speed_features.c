@@ -1267,6 +1267,10 @@ void av2_set_speed_features_framesize_independent(AV2_COMP *cpi, int speed) {
       clamp(sf->inter_sf.warp_delta_rdlat_num_cands, 1, 8);
   sf->inter_sf.warp_delta_rdlat_iters =
       clamp(sf->inter_sf.warp_delta_rdlat_iters, 1, 4);
+  if (sf->inter_sf.warp_delta_search_method == WARP_DELTA_GRADIENT_RDLAT &&
+      sf->inter_sf.warp_delta_rdlat_mv_refine >= 2) {
+    sf->mv_sf.warp_search_method = WARP_SEARCH_RDLAT;
+  }
 
   if (oxcf->mode == GOOD && cpi->oxcf.enable_low_complexity_decode) {
     // TODO (yunqingwang): LC speed features are added below.

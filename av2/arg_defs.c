@@ -593,11 +593,11 @@ const av2_codec_arg_definitions_t g_av2_codec_arg_defs = {
       ARG_DEF(NULL, "warp-delta-rdlat-iters", 1,
               "Warp delta RD-lattice search (method 3): Gauss-Newton "
               "iterations (1..4, -1: default 1)"),
-  .warp_delta_rdlat_mv_refine =
-      ARG_DEF(NULL, "warp-delta-rdlat-mv-refine", 1,
-              "Warp delta RD-lattice search (method 3): refine translational "
-              "MV in WARP_NEWMV (0: off, 1: 8-pt, 2: 4-pt diamond, -1: default "
-              "1)"),
+  .warp_delta_rdlat_mv_refine = ARG_DEF(
+      NULL, "warp-delta-rdlat-mv-refine", 1,
+      "Warp delta RD-lattice search (method 3): gradient-derived MV "
+      "refinement (0: off, 1: WARP_DELTA, 2: all warped MV, -1: default "
+      "1)"),
   .warp_delta_rdlat_polish =
       ARG_DEF(NULL, "warp-delta-rdlat-polish", 1,
               "Warp delta RD-lattice search (method 3): final +/-1 polish "
