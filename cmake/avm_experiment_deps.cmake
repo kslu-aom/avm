@@ -42,6 +42,11 @@ macro(fix_experiment_configs)
     change_config_and_warn(CONFIG_UV_CFL 0 !CONFIG_AIMC)
   endif()
 
+  if(NOT CONFIG_AFFINE_REFINEMENT AND CONFIG_AFFINE_REFINEMENT_SB)
+    change_config_and_warn(CONFIG_AFFINE_REFINEMENT_SB 0
+                           !CONFIG_AFFINE_REFINEMENT)
+  endif()
+
   if(CONFIG_ML_PART_SPLIT)
     change_config_and_warn(CONFIG_TENSORFLOW_LITE 1 CONFIG_ML_PART_SPLIT)
   endif()

@@ -144,6 +144,11 @@ set_avm_config_var(
 set_avm_config_var(CONFIG_ML_PART_SPLIT 1
                    "Partition SPLIT pruning/forcing as predicted by ML.")
 
+set_avm_config_var(CONFIG_AFFINE_REFINEMENT 1
+                   "Decoder side affine motion refinement.")
+set_avm_config_var(CONFIG_AFFINE_REFINEMENT_SB 1
+                   "Subblock based affine refinement")
+
 set_avm_config_var(
   CONFIG_MIXED_LOSSLESS_ENCODE 0
   "Encoder only flag to configure encoder to enable mixed lossy/lossless coding"

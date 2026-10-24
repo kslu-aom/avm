@@ -202,6 +202,11 @@ specialize qw/av2_build_compound_diffwtd_mask_highbd ssse3 avx2/;
 add_proto qw/void av2_build_compound_diffwtd_mask_d16/, "uint8_t *mask, DIFFWTD_MASK_TYPE mask_type, const CONV_BUF_TYPE *src0, int src0_stride, const CONV_BUF_TYPE *src1, int src1_stride, int h, int w, ConvolveParams *conv_params, int bd";
 specialize qw/av2_build_compound_diffwtd_mask_d16 sse4_1 avx2 neon/;
 
+if (avm_config("CONFIG_AFFINE_REFINEMENT") eq "yes") {
+  add_proto qw/void av2_calc_affine_autocorrelation_matrix/, "const int16_t *pdiff, int pstride, const int16_t *gx, const int16_t *gy, int gstride, int bw, int bh, int32_t *mat_a, int32_t *vec_b";
+  specialize qw/av2_calc_affine_autocorrelation_matrix avx2/;
+}
+
 add_proto qw/void av2_avg_pooling_pdiff_gradients/,"int16_t *pdiff, const int pstride, int16_t *gx, int16_t *gy, const int gstride, const int bw, const int bh, const int n";
 specialize qw/av2_avg_pooling_pdiff_gradients avx2/;
 
@@ -404,11 +409,24 @@ if (avm_config("CONFIG_AV2_ENCODER") eq "yes") {
 
 # WARPED_MOTION / GLOBAL_MOTION functions
 
-add_proto qw/void av2_highbd_warp_affine/, "const int32_t *mat, const uint16_t *ref, int width, int height, int stride, uint16_t *pred, int p_col, int p_row, int p_width, int p_height, int p_stride, int subsampling_x, int subsampling_y, int bd, ConvolveParams *conv_params, int16_t alpha, int16_t beta, int16_t gamma, int16_t delta";
+if (avm_config("CONFIG_AFFINE_REFINEMENT") eq "yes") {
+  add_proto qw/void av2_highbd_warp_affine/, "const int32_t *mat, const uint16_t *ref, int width, int height, int stride, uint16_t *pred, int p_col, int p_row, int p_width, int p_height, int p_stride, int subsampling_x, int subsampling_y, int bd, ConvolveParams *conv_params, int16_t alpha, int16_t beta, int16_t gamma, int16_t delta, int use_damr_padding, PadBlock *ref_area";
+} else {
+  add_proto qw/void av2_highbd_warp_affine/, "const int32_t *mat, const uint16_t *ref, int width, int height, int stride, uint16_t *pred, int p_col, int p_row, int p_width, int p_height, int p_stride, int subsampling_x, int subsampling_y, int bd, ConvolveParams *conv_params, int16_t alpha, int16_t beta, int16_t gamma, int16_t delta";
+}
 specialize qw/av2_highbd_warp_affine sse4_1 avx2/;
 
-add_proto qw/void av2_ext_highbd_warp_affine/, "const int32_t *mat, const uint16_t *ref, int width, int height, int stride, uint16_t *pred, int p_col, int p_row, int p_width, int p_height, int p_stride, int subsampling_x, int subsampling_y, int bd, ConvolveParams *conv_params, int use_warp_bd_box, PadBlock *warp_bd_box";
+if (avm_config("CONFIG_AFFINE_REFINEMENT") eq "yes") {
+  add_proto qw/void av2_ext_highbd_warp_affine/, "const int32_t *mat, const uint16_t *ref, int width, int height, int stride, uint16_t *pred, int p_col, int p_row, int p_width, int p_height, int p_stride, int subsampling_x, int subsampling_y, int bd, ConvolveParams *conv_params, int use_warp_bd_box, PadBlock *warp_bd_box, int use_warp_bd_damr, PadBlock *warp_bd_box_damr";
+} else {
+  add_proto qw/void av2_ext_highbd_warp_affine/, "const int32_t *mat, const uint16_t *ref, int width, int height, int stride, uint16_t *pred, int p_col, int p_row, int p_width, int p_height, int p_stride, int subsampling_x, int subsampling_y, int bd, ConvolveParams *conv_params, int use_warp_bd_box, PadBlock *warp_bd_box";
+}
 specialize qw/av2_ext_highbd_warp_affine sse4_1/;
+
+if (avm_config("CONFIG_AFFINE_REFINEMENT") eq "yes") {
+  add_proto qw/void av2_warp_plane_bilinear/, "WarpedMotionParams *wm, int bd, const uint16_t *ref, int width, int height, int stride, uint16_t *pred, int p_col, int p_row, int p_width, int p_height, int p_stride, int subsampling_x, int subsampling_y, ConvolveParams *conv_params, PadBlock *ref_area";
+  specialize qw/av2_warp_plane_bilinear avx2/;
+}
 
 # CONVOLVE_ROUND/COMPOUND_ROUND functions
 

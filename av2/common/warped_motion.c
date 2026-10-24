@@ -509,9 +509,8 @@ static int is_affine_shear_allowed(int16_t alpha, int16_t beta, int16_t gamma,
     return 1;
 }
 
-void av2_get_shear_params(WarpedMotionParams *wm, const struct scale_factors *sf
-
-) {
+void av2_get_shear_params(WarpedMotionParams *wm,
+                          const struct scale_factors *sf) {
   const int16_t max_value = INT16_MAX - (1 << (WARP_PARAM_REDUCE_BITS - 1));
 
   // Always use 4x4 warp in scale of across-scale
@@ -716,11 +715,24 @@ void av2_highbd_warp_affine_c(const int32_t *mat, const uint16_t *ref,
                               int p_stride, int subsampling_x,
                               int subsampling_y, int bd,
                               ConvolveParams *conv_params, int16_t alpha,
-                              int16_t beta, int16_t gamma, int16_t delta) {
-  const int left_limit = 0;
-  const int right_limit = width - 1;
-  const int top_limit = 0;
-  const int bottom_limit = height - 1;
+                              int16_t beta, int16_t gamma, int16_t delta
+#if CONFIG_AFFINE_REFINEMENT
+                              ,
+                              int use_damr_padding, PadBlock *ref_area
+#endif  // CONFIG_AFFINE_REFINEMENT
+) {
+  int left_limit = 0;
+  int right_limit = width - 1;
+  int top_limit = 0;
+  int bottom_limit = height - 1;
+#if CONFIG_AFFINE_REFINEMENT
+  if (use_damr_padding) {
+    left_limit = ref_area->x0;
+    right_limit = ref_area->x1 - 1;
+    top_limit = ref_area->y0;
+    bottom_limit = ref_area->y1 - 1;
+  }
+#endif  // CONFIG_AFFINE_REFINEMENT
   int32_t tmp[15 * 8];
   const int reduce_bits_horiz = conv_params->round_0;
   const int reduce_bits_vert = conv_params->is_compound
@@ -870,7 +882,13 @@ void av2_ext_highbd_warp_affine_c(const int32_t *mat, const uint16_t *ref,
                                   int p_width, int p_height, int p_stride,
                                   int subsampling_x, int subsampling_y, int bd,
                                   ConvolveParams *conv_params,
-                                  int use_warp_bd_box, PadBlock *warp_bd_box) {
+                                  int use_warp_bd_box, PadBlock *warp_bd_box
+#if CONFIG_AFFINE_REFINEMENT
+                                  ,
+                                  int use_warp_bd_damr,
+                                  PadBlock *warp_bd_box_damr
+#endif  // CONFIG_AFFINE_REFINEMENT
+) {
   int32_t im_block[(4 + EXT_WARP_TAPS - 1) * 4];
   const int reduce_bits_horiz = conv_params->round_0;
   const int reduce_bits_vert = conv_params->is_compound
@@ -898,6 +916,15 @@ void av2_ext_highbd_warp_affine_c(const int32_t *mat, const uint16_t *ref,
   int bottom_limit = height - 1;
   int warp_bd_box_mem_stride = MAX_WARP_BD_SIZE;
   int box_idx, x_loc, y_loc;
+
+#if CONFIG_AFFINE_REFINEMENT
+  if (use_warp_bd_damr) {
+    left_limit = warp_bd_box_damr->x0;
+    right_limit = warp_bd_box_damr->x1 - 1;
+    top_limit = warp_bd_box_damr->y0;
+    bottom_limit = warp_bd_box_damr->y1 - 1;
+  }
+#endif  // CONFIG_AFFINE_REFINEMENT
 
   for (int i = p_row; i < p_row + p_height; i += 4) {
     for (int j = p_col; j < p_col + p_width; j += 4) {
@@ -1005,7 +1032,12 @@ void av2_ext_highbd_warp_affine_scaled_c(
     uint16_t *pred, int p_col, int p_row, int p_width, int p_height,
     int p_stride, int subsampling_x, int subsampling_y, int bd,
     ConvolveParams *conv_params, const struct scale_factors *sf,
-    int use_warp_bd_box, PadBlock *warp_bd_box) {
+    int use_warp_bd_box, PadBlock *warp_bd_box
+#if CONFIG_AFFINE_REFINEMENT
+    ,
+    int use_warp_bd_damr, PadBlock *warp_bd_box_damr
+#endif  // CONFIG_AFFINE_REFINEMENT
+) {
   //  int32_t im_block[(4 + EXT_WARP_TAPS - 1) * 4];
   int32_t im_block[(2 * 4 + EXT_WARP_TAPS) * 4];
   const int reduce_bits_horiz = conv_params->round_0;
@@ -1049,6 +1081,14 @@ void av2_ext_highbd_warp_affine_scaled_c(
         top_limit = warp_bd_box[box_idx].y0;
         bottom_limit = warp_bd_box[box_idx].y1 - 1;
       }
+#if CONFIG_AFFINE_REFINEMENT
+      if (use_warp_bd_damr) {
+        left_limit = warp_bd_box_damr->x0;
+        right_limit = warp_bd_box_damr->x1 - 1;
+        top_limit = warp_bd_box_damr->y0;
+        bottom_limit = warp_bd_box_damr->y1 - 1;
+      }
+#endif  // CONFIG_AFFINE_REFINEMENT
       // Calculate the center of this 4x4 block,
       // project to luma coordinates (if in a subsampled chroma plane),
       // apply the affine transformation,
@@ -1178,8 +1218,16 @@ void av2_highbd_warp_plane(WarpedMotionParams *wm, const uint16_t *const ref,
                            int p_width, int p_height, int p_stride,
                            int subsampling_x, int subsampling_y, int bd,
                            ConvolveParams *conv_params,
-                           const struct scale_factors *sf, int use_warp_bd_box,
-                           PadBlock *warp_bd_box) {
+                           const struct scale_factors *sf,
+#if CONFIG_AFFINE_REFINEMENT
+                           int use_damr_padding, ReferenceArea *ref_area,
+#endif  // CONFIG_AFFINE_REFINEMENT
+                           int use_warp_bd_box, PadBlock *warp_bd_box
+#if CONFIG_AFFINE_REFINEMENT
+                           ,
+                           int use_warp_bd_damr, PadBlock *warp_bd_box_damr
+#endif  // CONFIG_AFFINE_REFINEMENT
+) {
   const int is_scaled = sf ? av2_is_scaled(sf) : 0;
   assert(wm->wmtype <= AFFINE);
   if (wm->wmtype == ROTZOOM) {
@@ -1203,18 +1251,34 @@ void av2_highbd_warp_plane(WarpedMotionParams *wm, const uint16_t *const ref,
       av2_ext_highbd_warp_affine_scaled_c(
           &wm_scaled.wmmat[0], ref, width, height, stride, pred, p_col, p_row,
           p_width, p_height, p_stride, subsampling_x, subsampling_y, bd,
-          conv_params, sf, use_warp_bd_box, warp_bd_box);
+          conv_params, sf, use_warp_bd_box, warp_bd_box
+#if CONFIG_AFFINE_REFINEMENT
+          ,
+          use_warp_bd_damr, warp_bd_box_damr
+#endif  // CONFIG_AFFINE_REFINEMENT
+      );
     } else {
       av2_ext_highbd_warp_affine(&wm_scaled.wmmat[0], ref, width, height,
                                  stride, pred, p_col, p_row, p_width, p_height,
                                  p_stride, subsampling_x, subsampling_y, bd,
-                                 conv_params, use_warp_bd_box, warp_bd_box);
+                                 conv_params, use_warp_bd_box, warp_bd_box
+#if CONFIG_AFFINE_REFINEMENT
+                                 ,
+                                 use_warp_bd_damr, warp_bd_box_damr
+#endif  // CONFIG_AFFINE_REFINEMENT
+      );
     }
   } else {
     av2_highbd_warp_affine(mat, ref, width, height, stride, pred, p_col, p_row,
                            p_width, p_height, p_stride, subsampling_x,
                            subsampling_y, bd, conv_params, alpha, beta, gamma,
-                           delta);
+                           delta
+#if CONFIG_AFFINE_REFINEMENT
+                           ,
+                           use_damr_padding,
+                           ref_area ? &ref_area->pad_block : NULL
+#endif  // CONFIG_AFFINE_REFINEMENT
+    );
   }
 }
 
@@ -1222,14 +1286,28 @@ void av2_warp_plane(WarpedMotionParams *wm, int bd, const uint16_t *ref,
                     int width, int height, int stride, uint16_t *pred,
                     int p_col, int p_row, int p_width, int p_height,
                     int p_stride, int subsampling_x, int subsampling_y,
-                    ConvolveParams *conv_params, const struct scale_factors *sf
-
+                    ConvolveParams *conv_params, const struct scale_factors *sf,
+#if CONFIG_AFFINE_REFINEMENT
+                    int use_damr_padding, ReferenceArea *ref_area,
+#endif  // CONFIG_AFFINE_REFINEMENT
+                    int use_warp_bd_box, PadBlock *warp_bd_box
+#if CONFIG_AFFINE_REFINEMENT
                     ,
-                    int use_warp_bd_box, PadBlock *warp_bd_box) {
+                    int use_warp_bd_damr, PadBlock *warp_bd_box_damr
+#endif  // CONFIG_AFFINE_REFINEMENT
+) {
   av2_highbd_warp_plane(wm, ref, width, height, stride, pred, p_col, p_row,
                         p_width, p_height, p_stride, subsampling_x,
-                        subsampling_y, bd, conv_params, sf, use_warp_bd_box,
-                        warp_bd_box);
+                        subsampling_y, bd, conv_params, sf,
+#if CONFIG_AFFINE_REFINEMENT
+                        use_damr_padding, ref_area,
+#endif  // CONFIG_AFFINE_REFINEMENT
+                        use_warp_bd_box, warp_bd_box
+#if CONFIG_AFFINE_REFINEMENT
+                        ,
+                        use_warp_bd_damr, warp_bd_box_damr
+#endif  // CONFIG_AFFINE_REFINEMENT
+  );
 }
 
 #define LS_MV_MAX 256  // max mv in 1/8-pel
@@ -1330,9 +1408,7 @@ static int32_t get_mult_shift_diag(int64_t Px, int16_t iDet, int shift) {
 static void find_affine_int(int np, const int *pts1, const int *pts2,
                             BLOCK_SIZE bsize, MV mv, WarpedMotionParams *wm,
                             int mi_row, int mi_col,
-                            const struct scale_factors *sf
-
-) {
+                            const struct scale_factors *sf) {
   int32_t A[2][2] = { { 0, 0 }, { 0, 0 } };
   int32_t Bx[2] = { 0, 0 };
   int32_t By[2] = { 0, 0 };
@@ -1443,9 +1519,8 @@ static void find_affine_int(int np, const int *pts1, const int *pts2,
 
 void av2_find_projection(int np, const int *pts1, const int *pts2,
                          BLOCK_SIZE bsize, MV mv, WarpedMotionParams *wm_params,
-                         int mi_row, int mi_col, const struct scale_factors *sf
-
-) {
+                         int mi_row, int mi_col,
+                         const struct scale_factors *sf) {
   assert(wm_params->wmtype <= AFFINE);
   find_affine_int(np, pts1, pts2, bsize, mv, wm_params, mi_row, mi_col, sf);
   wm_params->invalid = 0;
@@ -1468,9 +1543,7 @@ int av2_extend_warp_model(const bool neighbor_is_above, const BLOCK_SIZE bsize,
                           const int mi_col,
                           const WarpedMotionParams *neighbor_wm,
                           WarpedMotionParams *wm_params,
-                          const struct scale_factors *sf
-
-) {
+                          const struct scale_factors *sf) {
   const int half_width_log2 = mi_size_wide_log2[bsize] + MI_SIZE_LOG2 - 1;
   const int half_height_log2 = mi_size_high_log2[bsize] + MI_SIZE_LOG2 - 1;
   const int center_x = (mi_col * MI_SIZE) + (1 << half_width_log2) - 1;
@@ -1623,9 +1696,7 @@ int_mv get_warp_motion_vector_xy_pos(const MACROBLOCKD *xd,
 //  position. pts_inref[2*n + 1] is the row value of the projected position
 int get_model_from_corner_mvs(WarpedMotionParams *derive_model, int *pts,
                               int np, int *mvs, const BLOCK_SIZE bsize,
-                              const struct scale_factors *sf
-
-) {
+                              const struct scale_factors *sf) {
   // In order to derive the warp model we need 3 projected points
   // If the number of projected points (np) is not equal to 3, model is not
   // valid.

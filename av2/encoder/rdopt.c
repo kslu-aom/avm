@@ -486,10 +486,26 @@ static int cost_prediction_mode(const ModeCosts *const mode_costs,
     if (cm->features.opfl_refine_type == REFINE_SWITCHABLE &&
         opfl_allowed_cur_refs_bsize(cm, xd, mbmi)) {
       const int use_optical_flow = mode >= NEAR_NEARMV_OPTFLOW;
-      const int opfl_ctx =
-          get_optflow_context(comp_idx_to_opfl_mode[comp_mode_idx]);
-      use_optical_flow_cost +=
-          mode_costs->use_optflow_cost[opfl_ctx][use_optical_flow];
+#if CONFIG_AFFINE_REFINEMENT
+      const int allow_translational = is_translational_refinement_allowed(
+          cm, mbmi->sb_type[xd->tree_type == CHROMA_PART], xd,
+          comp_idx_to_opfl_mode[comp_mode_idx]);
+      const int allow_affine = is_affine_refinement_allowed(
+          cm, xd, comp_idx_to_opfl_mode[comp_mode_idx]);
+      if (use_optical_flow) {
+        assert(IMPLIES(allow_translational,
+                       mbmi->comp_refine_type > COMP_REFINE_NONE));
+        assert(IMPLIES(allow_affine,
+                       mbmi->comp_refine_type >= COMP_AFFINE_REFINE_START));
+      }
+      if (allow_affine || allow_translational)
+#endif  // CONFIG_AFFINE_REFINEMENT
+      {
+        const int opfl_ctx =
+            get_optflow_context(comp_idx_to_opfl_mode[comp_mode_idx]);
+        use_optical_flow_cost +=
+            mode_costs->use_optflow_cost[opfl_ctx][use_optical_flow];
+      }
     }
 
     if (is_new_nearmv_pred_mode_disallowed(mbmi)) {
@@ -4168,6 +4184,9 @@ static int process_compound_inter_mode(
       is_any_masked_compound_used(bsize) &&
       cm->seq_params.enable_masked_compound &&
       (!mbmi->refinemv_flag || !switchable_refinemv_flag(cm, mbmi)) &&
+#if CONFIG_AFFINE_REFINEMENT
+      mbmi->comp_refine_type < COMP_AFFINE_REFINE_START &&
+#endif  // CONFIG_AFFINE_REFINEMENT
       !opfl_allowed_cur_pred_mode(cm, xd, mbmi);
   int mode_search_mask =
       (1 << COMPOUND_AVERAGE) | (1 << COMPOUND_WEDGE) | (1 << COMPOUND_DIFFWTD);
@@ -5871,6 +5890,9 @@ static int64_t rd_pick_intrabc_mode_sb(const AV2_COMP *cpi, MACROBLOCK *x,
       mbmi->interp_fltr = BILINEAR;
       mbmi->skip_txfm[xd->tree_type == CHROMA_PART] = 0;
       mbmi->cwp_idx = CWP_EQUAL;
+#if CONFIG_AFFINE_REFINEMENT
+      mbmi->comp_refine_type = COMP_REFINE_NONE;
+#endif  // CONFIG_AFFINE_REFINEMENT
 
       mbmi->warp_ref_idx = 0;
       mbmi->max_num_warp_candidates = 0;
@@ -6206,6 +6228,9 @@ static AVM_INLINE void rd_pick_skip_mode(
   mbmi->ref_frame[0] = ref_frame;
   mbmi->ref_frame[1] = second_ref_frame;
   mbmi->cwp_idx = CWP_EQUAL;
+#if CONFIG_AFFINE_REFINEMENT
+  mbmi->comp_refine_type = COMP_REFINE_NONE;
+#endif  // CONFIG_AFFINE_REFINEMENT
   mbmi->use_intrabc[xd->tree_type == CHROMA_PART] = 0;
   mbmi->warp_ref_idx = 0;
   mbmi->max_num_warp_candidates = 0;
@@ -6366,6 +6391,9 @@ static AVM_INLINE void rd_pick_skip_mode(
       search_state->best_mbmode.fsc_mode[xd->tree_type == CHROMA_PART] = 0;
 
       search_state->best_mbmode.mode = NEAR_NEARMV;
+#if CONFIG_AFFINE_REFINEMENT
+      mbmi->comp_refine_type = COMP_REFINE_NONE;
+#endif  // CONFIG_AFFINE_REFINEMENT
       search_state->best_mbmode.ref_frame[0] = mbmi->ref_frame[0];
       search_state->best_mbmode.ref_frame[1] = mbmi->ref_frame[1];
       search_state->best_mbmode.mv[0].as_int = mbmi->mv[0].as_int;
@@ -7244,6 +7272,9 @@ static INLINE void init_mbmi(MB_MODE_INFO *mbmi, PREDICTION_MODE curr_mode,
   mbmi->use_intra_dip = 0;
   mbmi->mv[0].as_int = mbmi->mv[1].as_int = 0;
   mbmi->cwp_idx = CWP_EQUAL;
+#if CONFIG_AFFINE_REFINEMENT
+  mbmi->comp_refine_type = COMP_REFINE_NONE;
+#endif  // CONFIG_AFFINE_REFINEMENT
   mbmi->motion_mode = SIMPLE_TRANSLATION;
   mbmi->interintra_mode = (INTERINTRA_MODE)(II_DC_PRED - 1);
   mbmi->refinemv_flag = 0;
@@ -8522,6 +8553,18 @@ void av2_rd_pick_inter_mode_sb(struct AV2_COMP *cpi,
             }
           }
 
+#if CONFIG_AFFINE_REFINEMENT
+          // Search compound refine type. cwp_idx has not been searched here,
+          // and it needs to be reset here to obtain the correct mask.
+          mbmi->cwp_idx = CWP_EQUAL;
+          const int allowed_comp_refine_mask =
+              get_allowed_comp_refine_type_mask(cm, xd, mbmi);
+          for (CompoundRefineType comp_refine_type = COMP_REFINE_START;
+               comp_refine_type < COMP_REFINE_TYPES; comp_refine_type++) {
+            if (!(allowed_comp_refine_mask & (1 << comp_refine_type))) continue;
+            mbmi->comp_refine_type = comp_refine_type;
+#endif  // CONFIG_AFFINE_REFINEMENT
+
           txfm_info->skip_txfm = 0;
           num_single_modes_processed += is_single_pred;
           set_ref_ptrs(cm, xd, ref_frame, second_ref_frame);
@@ -8646,6 +8689,9 @@ void av2_rd_pick_inter_mode_sb(struct AV2_COMP *cpi,
           record_best_compound(cm->current_frame.reference_mode, &rd_stats,
                                comp_pred, x->rdmult, &search_state,
                                compmode_cost);
+#if CONFIG_AFFINE_REFINEMENT
+          }  // end of comp_refine_type loop
+#endif  // CONFIG_AFFINE_REFINEMENT
         }  // end of use_amvd mode loop
       }  // end of ref1 loop
     }  // end of ref0 loop

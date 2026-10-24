@@ -741,6 +741,14 @@ static PREDICTION_MODE read_inter_compound_mode(MACROBLOCKD *xd, avm_reader *r,
                                                 const AV2_COMMON *cm,
                                                 MB_MODE_INFO *const mbmi,
                                                 int16_t ctx) {
+#if CONFIG_AFFINE_REFINEMENT
+  mbmi->comp_refine_type = cm->features.opfl_refine_type == REFINE_ALL
+                               ? (cm->seq_params.enable_affine_refine
+                                      ? COMP_REFINE_TYPE_FOR_REFINE_ALL
+                                      : COMP_REFINE_SUBBLK2P)
+                               : COMP_REFINE_NONE;
+#endif  // CONFIG_AFFINE_REFINEMENT
+
   int mode = 0;
   int use_optical_flow = 0;
   if (is_new_nearmv_pred_mode_disallowed(mbmi)) {
@@ -770,14 +778,24 @@ static PREDICTION_MODE read_inter_compound_mode(MACROBLOCKD *xd, avm_reader *r,
     const int allow_translational_refinement =
         is_translational_refinement_allowed(
             cm, mbmi->sb_type[xd->tree_type == CHROMA_PART], xd,
-
             comp_idx_to_opfl_mode[mode]);
+#if CONFIG_AFFINE_REFINEMENT
+    const int allow_affine_refinement =
+        is_affine_refinement_allowed(cm, xd, comp_idx_to_opfl_mode[mode]);
+    if (allow_affine_refinement || allow_translational_refinement) {
+#else
     if (allow_translational_refinement) {
+#endif  // CONFIG_AFFINE_REFINEMENT
       const int opfl_ctx = get_optflow_context(comp_idx_to_opfl_mode[mode]);
       use_optical_flow =
           avm_read_symbol(r, xd->tile_ctx->use_optflow_cdf[opfl_ctx], 2,
                           ACCT_INFO("use_optical_flow"));
     }
+#if CONFIG_AFFINE_REFINEMENT
+    mbmi->comp_refine_type =
+        use_optical_flow ? COMP_REFINE_SUBBLK2P + allow_affine_refinement
+                         : COMP_REFINE_NONE;
+#endif  // CONFIG_AFFINE_REFINEMENT
     if (use_optical_flow) {
       assert(is_inter_compound_mode(comp_idx_to_opfl_mode[mode]));
       return comp_idx_to_opfl_mode[mode];
@@ -2653,6 +2671,9 @@ static void read_inter_block_mode_info(AV2Decoder *const pbi,
   mbmi->bawp_flag[0] = 0;
   mbmi->bawp_flag[1] = 0;
   mbmi->refinemv_flag = 0;
+#if CONFIG_AFFINE_REFINEMENT
+  mbmi->comp_refine_type = COMP_REFINE_NONE;
+#endif  // CONFIG_AFFINE_REFINEMENT
 
   mbmi->num_proj_ref[0] = 0;  // assume num_proj_ref >=1
   mbmi->num_proj_ref[1] = 0;  // assume num_proj_ref >=1
@@ -2679,6 +2700,9 @@ static void read_inter_block_mode_info(AV2Decoder *const pbi,
 
   mbmi->warp_ref_idx = 0;
   mbmi->max_num_warp_candidates = 0;
+#if CONFIG_AFFINE_REFINEMENT
+  mbmi->comp_refine_type = COMP_REFINE_NONE;
+#endif  // CONFIG_AFFINE_REFINEMENT
 
   mbmi->warpmv_with_mvd_flag = 0;
   mbmi->motion_mode = SIMPLE_TRANSLATION;
@@ -2706,6 +2730,9 @@ static void read_inter_block_mode_info(AV2Decoder *const pbi,
       assert(0);
     } else {
       mbmi->mode = NEAR_NEARMV;
+#if CONFIG_AFFINE_REFINEMENT
+      mbmi->comp_refine_type = COMP_REFINE_NONE;
+#endif  // CONFIG_AFFINE_REFINEMENT
     }
   } else {
     if (segfeature_active(&cm->seg, mbmi->segment_id, SEG_LVL_SKIP) ||

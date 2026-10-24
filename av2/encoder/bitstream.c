@@ -260,7 +260,19 @@ static AVM_INLINE void write_inter_compound_mode(MACROBLOCKD *xd, avm_writer *w,
         is_translational_refinement_allowed(
             cm, mbmi->sb_type[xd->tree_type == CHROMA_PART], xd,
             comp_idx_to_opfl_mode[comp_mode_idx]);
+#if CONFIG_AFFINE_REFINEMENT
+    const int allow_affine_refinement = is_affine_refinement_allowed(
+        cm, xd, comp_idx_to_opfl_mode[comp_mode_idx]);
+    if (use_optical_flow) {
+      assert(IMPLIES(allow_translational_refinement,
+                     mbmi->comp_refine_type > COMP_REFINE_NONE));
+      assert(IMPLIES(allow_affine_refinement,
+                     mbmi->comp_refine_type >= COMP_AFFINE_REFINE_START));
+    }
+    if (allow_affine_refinement || allow_translational_refinement) {
+#else
     if (allow_translational_refinement) {
+#endif  // CONFIG_AFFINE_REFINEMENT
       const int opfl_ctx =
           get_optflow_context(comp_idx_to_opfl_mode[comp_mode_idx]);
       avm_write_symbol(w, use_optical_flow,
@@ -4703,9 +4715,17 @@ void write_sequence_inter_group_tool_flags(
   }
   if (seq_params->single_picture_header_flag) {
     assert(seq_params->enable_opfl_refine == AVM_OPFL_REFINE_NONE);
+#if CONFIG_AFFINE_REFINEMENT
+    assert(!seq_params->enable_affine_refine);
+#endif  // CONFIG_AFFINE_REFINEMENT
     assert(!seq_params->enable_refinemv);
   } else {
     avm_wb_write_literal(wb, seq_params->enable_opfl_refine, 2);
+#if CONFIG_AFFINE_REFINEMENT
+    if (seq_params->enable_opfl_refine > AVM_OPFL_REFINE_NONE) {
+      avm_wb_write_bit(wb, seq_params->enable_affine_refine);
+    }
+#endif  // CONFIG_AFFINE_REFINEMENT
     avm_wb_write_bit(wb, seq_params->enable_refinemv);
   }
   if (seq_params->enable_tip != 0 &&

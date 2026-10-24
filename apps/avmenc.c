@@ -308,6 +308,9 @@ const arg_def_t *av2_key_val_args[] = {
   &g_av2_codec_arg_defs.enable_mv_traj,
   &g_av2_codec_arg_defs.enable_onesided_comp,
   &g_av2_codec_arg_defs.enable_opfl_refine,
+#if CONFIG_AFFINE_REFINEMENT
+  &g_av2_codec_arg_defs.enable_affine_refine,
+#endif  // CONFIG_AFFINE_REFINEMENT
   &g_av2_codec_arg_defs.enable_overlay,
   &g_av2_codec_arg_defs.enable_paeth_intra,
   &g_av2_codec_arg_defs.enable_palette,
@@ -588,6 +591,9 @@ static void init_config(cfg_options_t *config) {
   config->enable_intra_dip = 1;
   config->enable_angle_delta = 1;
   config->enable_opfl_refine = 1;
+#if CONFIG_AFFINE_REFINEMENT
+  config->enable_affine_refine = 1;
+#endif  // CONFIG_AFFINE_REFINEMENT
   config->explicit_ref_frame_map = 0;
   config->add_sef_for_hidden_frames = 0;
   config->monotonic_output_order = 0;
@@ -1511,6 +1517,10 @@ static void show_stream_config(struct stream_state *stream,
 
   fprintf(stdout, "                               : OptflowRefinement (%d)\n",
           encoder_cfg->enable_opfl_refine);
+#if CONFIG_AFFINE_REFINEMENT
+  fprintf(stdout, "                               : AffineRefinement (%d)\n",
+          encoder_cfg->enable_affine_refine);
+#endif  // CONFIG_AFFINE_REFINEMENT
 
   fprintf(stdout,
           "Tool setting (Transform)       : Flip & IDT (%d), "

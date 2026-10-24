@@ -32,6 +32,7 @@ extern "C" {
 #endif
 
 #include "avm/avm_codec.h"
+#include "config/avm_config.h"
 
 /*!\brief Current ABI version number
  *
@@ -518,6 +519,12 @@ typedef struct cfg_options {
    *
    */
   avm_opfl_refine_type enable_opfl_refine;
+#if CONFIG_AFFINE_REFINEMENT
+  /*!\brief enable affine refinement
+   *
+   */
+  unsigned int enable_affine_refine;
+#endif  // CONFIG_AFFINE_REFINEMENT
   /*!\brief enable intra edge filter
    *
    */

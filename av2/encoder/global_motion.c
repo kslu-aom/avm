@@ -167,10 +167,12 @@ static int64_t highbd_warp_error(WarpedMotionParams *wm,
       const int warp_h = AVMMIN(error_bsize_h, p_row + ref_height - i);
       av2_highbd_warp_plane(wm, ref, ref_width, ref_height, ref_stride, tmp, j,
                             i, warp_w, warp_h, WARP_ERROR_BLOCK, subsampling_x,
-                            subsampling_y, bd, &conv_params, NULL
-
+                            subsampling_y, bd, &conv_params, NULL, 0, NULL
+#if CONFIG_AFFINE_REFINEMENT
                             ,
-                            0, NULL);
+                            0, NULL, 0, NULL
+#endif  // CONFIG_AFFINE_REFINEMENT
+      );
 
       if (warp_w == WARP_ERROR_BLOCK && warp_h == WARP_ERROR_BLOCK) {
         gm_sumerr += avm_highbd_sad32x32(tmp, WARP_ERROR_BLOCK,
@@ -217,9 +219,8 @@ int64_t av2_refine_integerized_param(
     WarpedMotionParams *wm, TransformationType wmtype, int bd, uint16_t *ref,
     int r_width, int r_height, int r_stride, uint16_t *dst, int d_width,
     int d_height, int d_stride, int n_refinements, int64_t ref_frame_error,
-    uint8_t *segment_map, int segment_map_stride, const struct scale_factors *sf
-
-) {
+    uint8_t *segment_map, int segment_map_stride,
+    const struct scale_factors *sf) {
   static const int max_trans_model_params[TRANS_TYPES] = { 0, 2, 4, 6 };
   const int border = ERRORADV_BORDER;
   int i = 0, p;

@@ -35,7 +35,7 @@ void generate_warped_model(libavm_test::ACMRandom *rnd, int32_t *mat,
                            int16_t *delta, int is_alpha_zero, int is_beta_zero,
                            int is_gamma_zero, int is_delta_zero);
 void generate_ref_area_limits(libavm_test::ACMRandom *rnd,
-                              ReferenceArea *ref_area, int w, int h, int out_w,
+                              PadBlock *ref_area, int w, int h, int out_w,
                               int out_h, int p_row, int p_col, int *mat,
                               int use_ref_area_pad);
 
@@ -72,14 +72,17 @@ class AV2WarpFilterTest : public ::testing::TestWithParam<WarpTestParams> {
 }  // namespace AV2WarpFilter
 
 namespace AV2HighbdWarpFilter {
-typedef void (*highbd_warp_affine_func)(const int32_t *mat, const uint16_t *ref,
-                                        int width, int height, int stride,
-                                        uint16_t *pred, int p_col, int p_row,
-                                        int p_width, int p_height, int p_stride,
-                                        int subsampling_x, int subsampling_y,
-                                        int bd, ConvolveParams *conv_params,
-                                        int16_t alpha, int16_t beta,
-                                        int16_t gamma, int16_t delta);
+typedef void (*highbd_warp_affine_func)(
+    const int32_t *mat, const uint16_t *ref, int width, int height, int stride,
+    uint16_t *pred, int p_col, int p_row, int p_width, int p_height,
+    int p_stride, int subsampling_x, int subsampling_y, int bd,
+    ConvolveParams *conv_params, int16_t alpha, int16_t beta, int16_t gamma,
+    int16_t delta
+#if CONFIG_AFFINE_REFINEMENT
+    ,
+    int use_damr_padding, PadBlock *ref_area
+#endif  // CONFIG_AFFINE_REFINEMENT
+);
 
 typedef std::tuple<int, int, int, int, highbd_warp_affine_func>
     HighbdWarpTestParam;
@@ -106,12 +109,50 @@ class AV2HighbdWarpFilterTest
 
 }  // namespace AV2HighbdWarpFilter
 
+#if CONFIG_AFFINE_REFINEMENT
+namespace AV2HighbdWarpBilinearFilter {
+typedef void (*highbd_warp_plane_bilinear_func)(
+    WarpedMotionParams *wm, int bd, const uint16_t *ref, int width, int height,
+    int stride, uint16_t *pred, int p_col, int p_row, int p_width, int p_height,
+    int p_stride, int subsampling_x, int subsampling_y,
+    ConvolveParams *conv_params, PadBlock *ref_area);
+
+typedef std::tuple<int, int, int, int, highbd_warp_plane_bilinear_func>
+    HighbdWarpBilinearTestParam;
+typedef std::tuple<HighbdWarpBilinearTestParam, int, int, int, int>
+    HighbdWarpBilinearTestParams;
+
+::testing::internal::ParamGenerator<HighbdWarpBilinearTestParams> BuildParams(
+    highbd_warp_plane_bilinear_func filter);
+
+class AV2HighbdWarpBilinearFilterTest
+    : public ::testing::TestWithParam<HighbdWarpBilinearTestParams> {
+ public:
+  virtual ~AV2HighbdWarpBilinearFilterTest();
+  virtual void SetUp();
+
+  virtual void TearDown();
+
+ protected:
+  void RunCheckOutput(highbd_warp_plane_bilinear_func test_impl);
+  void RunTest_ExtremeValues(highbd_warp_plane_bilinear_func test_impl);
+  void RunSpeedTest(highbd_warp_plane_bilinear_func test_impl);
+  libavm_test::ACMRandom rnd_;
+};
+}  // namespace AV2HighbdWarpBilinearFilter
+#endif  // CONFIG_AFFINE_REFINEMENT
+
 namespace AV2ExtHighbdWarpFilter {
 typedef void (*ext_highbd_warp_affine_func)(
     const int32_t *mat, const uint16_t *ref, int width, int height, int stride,
     uint16_t *pred, int p_col, int p_row, int p_width, int p_height,
     int p_stride, int subsampling_x, int subsampling_y, int bd,
-    ConvolveParams *conv_params, int use_warp_bd_box, PadBlock *warp_bd_box);
+    ConvolveParams *conv_params, int use_warp_bd_box, PadBlock *warp_bd_box
+#if CONFIG_AFFINE_REFINEMENT
+    ,
+    int use_warp_bd_damr, PadBlock *warp_bd_box_damr
+#endif  // CONFIG_AFFINE_REFINEMENT
+);
 
 typedef ::testing::tuple<int, int, int, int, ext_highbd_warp_affine_func>
     ExtHighbdWarpTestParam;

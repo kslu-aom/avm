@@ -313,7 +313,12 @@ int opfl_refine_fullpel_mv_one_sided(
     av2_copy_pred_array_highbd(dst0, dst1, bw, tmp0, tmp1, bw, bh, 1, -1,
                                xd->bd, 1);
   // Buffers gx0 and gy0 are used to store the gradients of tmp0
+#if CONFIG_AFFINE_REFINEMENT
+  av2_compute_subpel_gradients_interp(tmp0, bw, bh, &grad_prec_bits, 0, gx0,
+                                      gy0);
+#else
   av2_compute_subpel_gradients_interp(tmp0, bw, bh, &grad_prec_bits, gx0, gy0);
+#endif  // CONFIG_AFFINE_REFINEMENT
   int bits = 3 + get_opfl_mv_upshift_bits(mbmi);
 #if OMVS_AVG_POOLING
   int n = AVMMIN(8, AVMMIN(bw, bh));
@@ -4622,6 +4627,10 @@ static INLINE unsigned int compute_motion_cost(
   const int mi_col = xd->mi_col;
 
   set_default_interp_filters(xd->mi[0], cm, xd, cm->features.interp_filter);
+#if CONFIG_AFFINE_REFINEMENT
+  if (cm->features.opfl_refine_type != REFINE_ALL)
+    xd->mi[0]->comp_refine_type = COMP_REFINE_NONE;
+#endif  // CONFIG_AFFINE_REFINEMENT
   av2_enc_build_inter_predictor(cm, xd, mi_row, mi_col, NULL, bsize,
                                 AVM_PLANE_Y, AVM_PLANE_Y);
 

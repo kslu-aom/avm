@@ -1166,6 +1166,9 @@ typedef struct SequenceHeader {
   uint8_t enable_masked_compound;           // enables/disables masked compound
   avm_opfl_refine_type enable_opfl_refine;  // optical flow refinement type for
                                             // this frame
+#if CONFIG_AFFINE_REFINEMENT
+  uint8_t enable_affine_refine;  // To turn on/off DAMR
+#endif                           // CONFIG_AFFINE_REFINEMENT
   uint8_t disable_loopfilters_across_tiles;
   uint8_t enable_cdef;                // To turn on/off CDEF
   uint8_t enable_gdf;                 // To turn on/off GDF
@@ -5746,6 +5749,10 @@ static AVM_INLINE int is_optflow_refinement_enabled(const AV2_COMMON *cm,
   if (cm->seq_params.enable_opfl_refine == AVM_OPFL_REFINE_NONE ||
       cm->features.opfl_refine_type == REFINE_NONE)
     return 0;
+
+#if CONFIG_AFFINE_REFINEMENT
+  if (mi->comp_refine_type == COMP_REFINE_NONE) return 0;
+#endif  // CONFIG_AFFINE_REFINEMENT
 
   if (tip_ref_frame) {
     const int bw = block_size_wide[mi->sb_type[xd->tree_type == CHROMA_PART]];
