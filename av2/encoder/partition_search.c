@@ -1352,7 +1352,13 @@ static void update_stats(const AV2_COMMON *const cm, ThreadData *td) {
             is_translational_refinement_allowed(
                 cm, mbmi->sb_type[xd->tree_type == CHROMA_PART], xd,
                 comp_idx_to_opfl_mode[comp_mode_idx]);
+#if CONFIG_AFFINE_REFINEMENT
+        const int allow_affine = is_affine_refinement_allowed(
+            cm, xd, comp_idx_to_opfl_mode[comp_mode_idx]);
+        if (allow_affine || allow_translational_refinement) {
+#else
         if (allow_translational_refinement) {
+#endif  // CONFIG_AFFINE_REFINEMENT
           const int opfl_ctx =
               get_optflow_context(comp_idx_to_opfl_mode[comp_mode_idx]);
 #if CONFIG_ENTROPY_STATS

@@ -354,6 +354,14 @@ static AVM_INLINE void check_opfl_edge(const AV2_COMMON *const cm,
                                        const int scale, TX_SIZE *ts,
                                        int32_t *opfl_edge) {
   const bool is_opfl_mode = opfl_allowed_cur_pred_mode(cm, xd, mbmi);
+#if CONFIG_AFFINE_REFINEMENT
+  if (is_opfl_mode && plane &&
+      mbmi->comp_refine_type >= COMP_AFFINE_REFINE_START) {
+    *opfl_edge = 1;
+    *ts = scale ? TX_4X4 : TX_8X8;
+    return;
+  }
+#endif  // CONFIG_AFFINE_REFINEMENT
   (void)plane;
   if (is_opfl_mode) {
     *opfl_edge = 1;
@@ -374,14 +382,25 @@ static AVM_INLINE void check_opfl_edge(const AV2_COMMON *const cm,
 
 // Check whether current block is RFMV mode
 static AVM_INLINE void check_rfmv_edge(const AV2_COMMON *const cm,
+                                       const MACROBLOCKD *const xd,
                                        const MB_MODE_INFO *const mbmi,
                                        const EDGE_DIR edge_dir, const int scale,
                                        TX_SIZE *ts, int32_t *rfmv_edge) {
   const int tip_ref_frame = is_tip_ref_frame(mbmi->ref_frame[0]);
-  int is_rfmv_mode = mbmi->refinemv_flag && !tip_ref_frame;
+  int is_rfmv_mode = mbmi->refinemv_flag &&
+#if CONFIG_AFFINE_REFINEMENT
+                     (is_damr_allowed_with_refinemv(mbmi->mode) ||
+                      mbmi->comp_refine_type < COMP_AFFINE_REFINE_START) &&
+#endif  // CONFIG_AFFINE_REFINEMENT
+                     !tip_ref_frame;
 
   (void)cm;
+  (void)xd;
+#if CONFIG_AFFINE_REFINEMENT
+  if (is_rfmv_mode && default_refinemv_modes(cm, mbmi))
+#else
   if (is_rfmv_mode && default_refinemv_modes(mbmi))
+#endif  // CONFIG_AFFINE_REFINEMENT
     is_rfmv_mode &= (mbmi->comp_group_idx == 0 &&
                      mbmi->interinter_comp.type == COMPOUND_AVERAGE);
 
@@ -429,7 +448,7 @@ static AVM_INLINE void check_sub_pu_edge(
   if (!temp_edge)
     check_opfl_edge(cm, plane, xd, mbmi, scale, &temp_ts, &temp_edge);
   if (!temp_edge)
-    check_rfmv_edge(cm, mbmi, edge_dir, scale, &temp_ts, &temp_edge);
+    check_rfmv_edge(cm, xd, mbmi, edge_dir, scale, &temp_ts, &temp_edge);
 
   if (temp_edge) {
     const int sub_pu_size =

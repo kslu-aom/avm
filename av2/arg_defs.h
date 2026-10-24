@@ -219,6 +219,9 @@ typedef struct av2_codec_arg_definitions {
   arg_def_t enable_intrabc_ext;
   arg_def_t enable_angle_delta;
   arg_def_t enable_opfl_refine;
+#if CONFIG_AFFINE_REFINEMENT
+  arg_def_t enable_affine_refine;
+#endif  // CONFIG_AFFINE_REFINEMENT
   arg_def_t enable_trellis_quant;
   arg_def_t enable_qm;
   arg_def_t qm_min;

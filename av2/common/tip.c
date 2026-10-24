@@ -438,6 +438,9 @@ static AVM_INLINE void tip_build_inter_predictors_8x8(
   mbmi->max_mv_precision = MV_PRECISION_ONE_EIGHTH_PEL;
   mbmi->pb_mv_precision = MV_PRECISION_ONE_EIGHTH_PEL;
   mbmi->morph_pred = 0;
+#if CONFIG_AFFINE_REFINEMENT
+  mbmi->comp_refine_type = COMP_REFINE_SUBBLK2P;
+#endif  // CONFIG_AFFINE_REFINEMENT
 
   uint16_t *refinemv_ref0 = NULL;
   uint16_t *refinemv_ref1 = NULL;
@@ -502,6 +505,14 @@ static AVM_INLINE void tip_build_inter_predictors_8x8(
       cm->features.tip_frame_mode == TIP_FRAME_AS_OUTPUT ? 15 : 6;
 
   const int use_4x4 = 0;
+#if CONFIG_AFFINE_REFINEMENT
+  int use_affine_opfl = 0;
+  WarpedMotionParams wms[8];
+  for (int mvi = 0; mvi < 4; mvi++) {
+    wms[2 * mvi] = default_warp_params;
+    wms[2 * mvi + 1] = default_warp_params;
+  }
+#endif  // CONFIG_AFFINE_REFINEMENT
   if (do_opfl) {
     if (do_pred) {
       assert(opfl_dst_stride == bw);
@@ -533,8 +544,11 @@ static AVM_INLINE void tip_build_inter_predictors_8x8(
     // precision.
     av2_get_optflow_based_mv(cm, xd, plane, mbmi, mv_refined, bw, bh, mi_x,
                              mi_y, 0 /* build_for_decode */, mc_buf,
-                             calc_subpel_params_func, gx0, gy0, gx1, gy1, vx0,
-                             vy0, vx1, vy1, dst0, dst1, opfl_dst_stride, 0,
+                             calc_subpel_params_func, gx0, gy0, gx1, gy1,
+#if CONFIG_AFFINE_REFINEMENT
+                             use_affine_opfl ? wms : NULL, &use_affine_opfl,
+#endif  // CONFIG_AFFINE_REFINEMENT
+                             vx0, vy0, vx1, vy1, dst0, dst1, opfl_dst_stride, 0,
                              use_4x4, best_mv_ref, bw, bh);
     xd->opfl_vxy_bufs[0] = *vx0;
     xd->opfl_vxy_bufs[N_OF_OFFSETS * 1] = *vx1;
@@ -545,6 +559,9 @@ static AVM_INLINE void tip_build_inter_predictors_8x8(
   if (plane == 0) {
     xd->mv_refined[0] = mv_refined[0];
     xd->mv_refined[1] = mv_refined[1];
+#if CONFIG_AFFINE_REFINEMENT
+    xd->use_affine_opfl = use_affine_opfl;
+#endif  // CONFIG_AFFINE_REFINEMENT
   }
 
   BacpBlockData bacp_block_data[2 * N_OF_OFFSETS];
@@ -581,8 +598,17 @@ static AVM_INLINE void tip_build_inter_predictors_8x8(
     if (do_opfl) {
       av2_opfl_rebuild_inter_predictor(
           dst, dst_stride, plane, mv_refined, &inter_pred_params, xd, mi_x,
-          mi_y, 0 /* build_for_decode */, cm, bw, ref, mc_buf,
-          calc_subpel_params_func, use_4x4, mbmi, bh, mv, 0);
+          mi_y, 0 /* build_for_decode */, cm, bw,
+#if CONFIG_AFFINE_REFINEMENT
+          vxy_bufs, 4, mbmi->comp_refine_type, use_affine_opfl ? wms : NULL,
+          &mbmi->mv[ref], use_affine_opfl,
+#endif  // CONFIG_AFFINE_REFINEMENT
+          ref, mc_buf, calc_subpel_params_func, use_4x4, mbmi, bh, mv, 0
+#if CONFIG_AFFINE_REFINEMENT
+          ,
+          0
+#endif  // CONFIG_AFFINE_REFINEMENT
+      );
     } else {
       const MV mv_1_16th_pel = convert_mv_to_1_16th_pel(&best_mv_ref[ref]);
       av2_build_one_inter_predictor(dst, dst_stride, &mv_1_16th_pel,
@@ -668,6 +694,9 @@ static AVM_INLINE void tip_build_inter_predictors_8x8_and_bigger(
     mbmi->interinter_comp.type = COMPOUND_AVERAGE;
     mbmi->max_mv_precision = MV_PRECISION_ONE_EIGHTH_PEL;
     mbmi->pb_mv_precision = MV_PRECISION_ONE_EIGHTH_PEL;
+#if CONFIG_AFFINE_REFINEMENT
+    mbmi->comp_refine_type = COMP_REFINE_SUBBLK2P;
+#endif  // CONFIG_AFFINE_REFINEMENT
     const int mi_row = -xd->mb_to_top_edge >> MI_SUBPEL_SIZE_LOG2;
     const int mi_col = -xd->mb_to_left_edge >> MI_SUBPEL_SIZE_LOG2;
     mbmi->chroma_ref_info.mi_row_chroma_base = mi_row;
@@ -706,6 +735,9 @@ static AVM_INLINE void tip_build_inter_predictors_8x8_and_bigger(
   if (plane == 0) {
     xd->mv_refined[0].as_mv = convert_mv_to_1_16th_pel(&mv[0]);
     xd->mv_refined[1].as_mv = convert_mv_to_1_16th_pel(&mv[1]);
+#if CONFIG_AFFINE_REFINEMENT
+    xd->use_affine_opfl = 0;
+#endif  // CONFIG_AFFINE_REFINEMENT
   }
 
   BacpBlockData bacp_block_data[2 * N_OF_OFFSETS];
@@ -882,6 +914,9 @@ void av2_tip_setup_tip_frame_row(AV2_COMMON *cm, MACROBLOCKD *xd, int blk_row,
         mbmi.motion_mode = SIMPLE_TRANSLATION;
         mbmi.interinter_comp.type = COMPOUND_AVERAGE;
         mbmi.cwp_idx = 0;
+#if CONFIG_AFFINE_REFINEMENT
+        mbmi.comp_refine_type = COMP_REFINE_SUBBLK2P;
+#endif  // CONFIG_AFFINE_REFINEMENT
         mbmi.refinemv_flag = 0;
 
         // Save the MVs before refinement into the TMVP list.

@@ -776,7 +776,11 @@ static AVM_INLINE void dec_build_inter_predictor(const AV2_COMMON *cm,
   int need_subblock_mvs = xd->is_chroma_ref && mbmi->refinemv_flag &&
                           !is_intrabc_block(mbmi, xd->tree_type);
   assert(IMPLIES(need_subblock_mvs, !is_interintra_pred(mbmi)));
+#if CONFIG_AFFINE_REFINEMENT
+  if (need_subblock_mvs && default_refinemv_modes(cm, mbmi))
+#else
   if (need_subblock_mvs && default_refinemv_modes(mbmi))
+#endif  // CONFIG_AFFINE_REFINEMENT
     need_subblock_mvs &= (mbmi->comp_group_idx == 0 &&
                           mbmi->interinter_comp.type == COMPOUND_AVERAGE);
   if (need_subblock_mvs) {
@@ -6026,9 +6030,18 @@ void read_sequence_inter_group_tool_flags(struct SequenceHeader *seq_params,
   }
   if (seq_params->single_picture_header_flag) {
     seq_params->enable_opfl_refine = AVM_OPFL_REFINE_NONE;
+#if CONFIG_AFFINE_REFINEMENT
+    seq_params->enable_affine_refine = 0;
+#endif  // CONFIG_AFFINE_REFINEMENT
     seq_params->enable_refinemv = 0;
   } else {
     seq_params->enable_opfl_refine = avm_rb_read_literal(rb, 2);
+#if CONFIG_AFFINE_REFINEMENT
+    seq_params->enable_affine_refine =
+        seq_params->enable_opfl_refine > AVM_OPFL_REFINE_NONE
+            ? avm_rb_read_bit(rb)
+            : 0;
+#endif  // CONFIG_AFFINE_REFINEMENT
     seq_params->enable_refinemv = avm_rb_read_bit(rb);
   }
 

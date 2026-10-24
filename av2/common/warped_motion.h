@@ -198,15 +198,31 @@ void av2_highbd_warp_plane(WarpedMotionParams *wm, const uint16_t *const ref,
                            int p_width, int p_height, int p_stride,
                            int subsampling_x, int subsampling_y, int bd,
                            ConvolveParams *conv_params,
-                           const struct scale_factors *sf, int use_warp_bd_box,
-                           PadBlock *warp_bd_box);
+                           const struct scale_factors *sf,
+#if CONFIG_AFFINE_REFINEMENT
+                           int use_damr_padding, ReferenceArea *ref_area,
+#endif  // CONFIG_AFFINE_REFINEMENT
+                           int use_warp_bd_box, PadBlock *warp_bd_box
+#if CONFIG_AFFINE_REFINEMENT
+                           ,
+                           int use_warp_bd_damr, PadBlock *warp_bd_box_damr
+#endif  // CONFIG_AFFINE_REFINEMENT
+);
 
 void av2_warp_plane(WarpedMotionParams *wm, int bd, const uint16_t *ref,
                     int width, int height, int stride, uint16_t *pred,
                     int p_col, int p_row, int p_width, int p_height,
                     int p_stride, int subsampling_x, int subsampling_y,
                     ConvolveParams *conv_params, const struct scale_factors *sf,
-                    int use_warp_bd_box, PadBlock *warp_bd_box);
+#if CONFIG_AFFINE_REFINEMENT
+                    int use_damr_padding, ReferenceArea *ref_area,
+#endif  // CONFIG_AFFINE_REFINEMENT
+                    int use_warp_bd_box, PadBlock *warp_bd_box
+#if CONFIG_AFFINE_REFINEMENT
+                    ,
+                    int use_warp_bd_damr, PadBlock *warp_bd_box_damr
+#endif  // CONFIG_AFFINE_REFINEMENT
+);
 
 void av2_find_projection(int np, const int *pts1, const int *pts2,
                          BLOCK_SIZE bsize, MV mv, WarpedMotionParams *wm_params,

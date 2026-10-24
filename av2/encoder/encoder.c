@@ -532,6 +532,10 @@ void av2_init_seq_coding_tools(AV2_COMP *cpi, SequenceHeader *seq,
   seq->enable_opfl_refine = seq->single_picture_header_flag
                                 ? AVM_OPFL_REFINE_NONE
                                 : tool_cfg->enable_opfl_refine;
+#if CONFIG_AFFINE_REFINEMENT
+  seq->enable_affine_refine =
+      seq->single_picture_header_flag ? 0 : tool_cfg->enable_affine_refine;
+#endif  // CONFIG_AFFINE_REFINEMENT
   seq->enable_tip = seq->single_picture_header_flag ? 0 : tool_cfg->enable_tip;
   seq->enable_tip_refinemv = tool_cfg->enable_tip_refinemv;
   seq->enable_tip_hole_fill = seq->enable_tip != 0;

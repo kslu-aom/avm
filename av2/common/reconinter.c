@@ -85,10 +85,20 @@ void av2_init_inter_params(InterPredParams *inter_pred_params, int block_width,
   inter_pred_params->comp_mode = UNIFORM_SINGLE;
 
   inter_pred_params->use_ref_padding = 0;
+#if CONFIG_AFFINE_REFINEMENT
+  inter_pred_params->use_damr_padding = 0;
+#endif  // CONFIG_AFFINE_REFINEMENT
   inter_pred_params->ref_area = NULL;
 
   inter_pred_params->use_warp_bd_box = 0;
   inter_pred_params->warp_bd_box = NULL;
+#if CONFIG_AFFINE_REFINEMENT
+  inter_pred_params->use_warp_bd_damr = 0;
+  inter_pred_params->warp_bd_box_damr.x0 = 0;
+  inter_pred_params->warp_bd_box_damr.y0 = 0;
+  inter_pred_params->warp_bd_box_damr.x1 = ref_buf->width;
+  inter_pred_params->warp_bd_box_damr.y1 = ref_buf->height;
+#endif  // CONFIG_AFFINE_REFINEMENT
 
   inter_pred_params->border_data.enable_bacp = 0;
   inter_pred_params->border_data.bacp_block_data = NULL;
@@ -147,8 +157,17 @@ void av2_make_inter_predictor(const uint16_t *src, int src_stride,
         inter_pred_params->block_width, inter_pred_params->block_height,
         dst_stride, inter_pred_params->subsampling_x,
         inter_pred_params->subsampling_y, &inter_pred_params->conv_params,
-        inter_pred_params->scale_factors, inter_pred_params->use_warp_bd_box,
-        inter_pred_params->warp_bd_box);
+        inter_pred_params->scale_factors,
+#if CONFIG_AFFINE_REFINEMENT
+        inter_pred_params->use_damr_padding, inter_pred_params->ref_area,
+#endif  // CONFIG_AFFINE_REFINEMENT
+        inter_pred_params->use_warp_bd_box, inter_pred_params->warp_bd_box
+#if CONFIG_AFFINE_REFINEMENT
+        ,
+        inter_pred_params->use_warp_bd_damr,
+        &inter_pred_params->warp_bd_box_damr
+#endif  // CONFIG_AFFINE_REFINEMENT
+    );
   } else if (inter_pred_params->mode == TRANSLATION_PRED) {
     highbd_inter_predictor(
         src, src_stride, dst, dst_stride, subpel_params,
@@ -778,6 +797,299 @@ int get_refinemv_sad(uint16_t *src1, uint16_t *src2, int stride, int width,
   return get_highbd_sad_ds(src1, stride, src2, stride, bd, width, height);
 }
 
+#if CONFIG_AFFINE_REFINEMENT
+int64_t stable_mult_shift(const int64_t a, const int64_t b, const int shift,
+                          const int msb_a, const int msb_b, const int max_bd,
+                          int *rem_shift) {
+  assert(shift >= 0);
+
+  // Remaining bit shifts (may be used in the next stage of multiplcation)
+  int rem = AVMMAX(0, msb_a + msb_b - shift + 1 - max_bd);
+  if (rem_shift) *rem_shift += rem;
+  if (msb_a + msb_b + 2 < max_bd)
+    return ROUND_POWER_OF_TWO_SIGNED_64(a * b, shift);
+
+  // To determine s1/s2/s3 in ((a>>s1)*(b>>s2))>>s3, consider the equation
+  //   (1+msb_a-s1)+(1+msb_b-s2)+1 <= max_bd+rem,
+  // where better numerical stability is obtained when
+  //   msb_a-s1 ~= msb_b-s2.
+  // This leads to the following solution
+  int msb_diff = abs(msb_a - msb_b);
+  // Total required shifts (s1 + s2)
+  int s = msb_a + msb_b - max_bd - rem + 4;
+  int diff = AVMMIN(s, msb_diff);
+  int s1 = (s - diff) >> 1;
+  int s2 = s1;
+  if (msb_a >= msb_b)
+    s1 = s - s2;
+  else
+    s2 = s - s1;
+
+  assert(s1 >= 0);
+  assert(s2 >= 0);
+  if (shift - s1 - s2 < 0) {
+    // bit depth not large enough to hold the result
+    return ((a > 0) ^ (b > 0)) ? -((1LL << (max_bd - 1)) - 1)
+                               : ((1LL << (max_bd - 1)) - 1);
+  }
+  return ROUND_POWER_OF_TWO_SIGNED_64(
+      ROUND_POWER_OF_TWO_SIGNED_64(a, s1) * ROUND_POWER_OF_TWO_SIGNED_64(b, s2),
+      shift - s1 - s2);
+}
+
+void av2_warp_plane_bilinear_c(WarpedMotionParams *wm, int bd,
+                               const uint16_t *ref, int width, int height,
+                               int stride, uint16_t *pred, int p_col, int p_row,
+                               int p_width, int p_height, int p_stride,
+                               int subsampling_x, int subsampling_y,
+                               ConvolveParams *conv_params,
+                               PadBlock *ref_area) {
+  (void)conv_params;
+  (void)width;
+  (void)height;
+  int left_limit;
+  int right_limit;
+  int top_limit;
+  int bottom_limit;
+  if (ref_area) {
+    left_limit = ref_area->x0;
+    right_limit = ref_area->x1 - 1;
+    top_limit = ref_area->y0;
+    bottom_limit = ref_area->y1 - 1;
+  } else {
+    left_limit = 0;
+    right_limit = width - 1;
+    top_limit = 0;
+    bottom_limit = height - 1;
+  }
+#define BILINEAR_WARP_PREC_BITS 12
+  assert(wm->wmtype <= AFFINE);
+  assert(!is_uneven_wtd_comp_avg(conv_params));
+  assert(IMPLIES(conv_params->is_compound, conv_params->dst != NULL));
+  const int32_t *const mat = wm->wmmat;
+
+  for (int i = p_row; i < p_row + p_height; i++) {
+    for (int j = p_col; j < p_col + p_width; j++) {
+      uint16_t *p = &pred[(i - p_row) * p_stride + (j - p_col)];
+
+      // Project to luma coordinates (if in a subsampled chroma plane), apply
+      // the affine transformation, then convert back to the original
+      // coordinates (if necessary)
+      const int32_t src_x = j << subsampling_x;
+      const int32_t src_y = i << subsampling_y;
+      const int64_t dst_x =
+          (int64_t)mat[2] * src_x + (int64_t)mat[3] * src_y + (int64_t)mat[0];
+      const int64_t dst_y =
+          (int64_t)mat[4] * src_x + (int64_t)mat[5] * src_y + (int64_t)mat[1];
+      const int64_t x = dst_x >> subsampling_x;
+      const int64_t y = dst_y >> subsampling_y;
+
+      const int32_t ix = (int32_t)(x >> WARPEDMODEL_PREC_BITS);
+      const int32_t ix0 = clamp(ix, left_limit, right_limit);
+      const int32_t ix1 = clamp(ix + 1, left_limit, right_limit);
+      const int32_t sx = x & ((1 << WARPEDMODEL_PREC_BITS) - 1);
+      const int32_t iy = (int32_t)(y >> WARPEDMODEL_PREC_BITS);
+      const int32_t iy0 = clamp(iy, top_limit, bottom_limit);
+      const int32_t iy1 = clamp(iy + 1, top_limit, bottom_limit);
+      const int32_t sy = y & ((1 << WARPEDMODEL_PREC_BITS) - 1);
+
+      const int32_t unit_offset = 1 << BILINEAR_WARP_PREC_BITS;
+      const int32_t coeff_x = ROUND_POWER_OF_TWO(
+          sx, WARPEDMODEL_PREC_BITS - BILINEAR_WARP_PREC_BITS);
+      const int32_t coeff_y = ROUND_POWER_OF_TWO(
+          sy, WARPEDMODEL_PREC_BITS - BILINEAR_WARP_PREC_BITS);
+
+      // Horizontal filter
+      int32_t tmp0 = ref[iy0 * stride + ix0] * (unit_offset - coeff_x) +
+                     ref[iy0 * stride + ix1] * coeff_x;
+      tmp0 = ROUND_POWER_OF_TWO(tmp0, BILINEAR_WARP_PREC_BITS);
+      int32_t tmp1 = ref[iy1 * stride + ix0] * (unit_offset - coeff_x) +
+                     ref[iy1 * stride + ix1] * coeff_x;
+      tmp1 = ROUND_POWER_OF_TWO(tmp1, BILINEAR_WARP_PREC_BITS);
+
+      // Vertical filter
+      int32_t sum = tmp0 * (unit_offset - coeff_y) + tmp1 * coeff_y;
+      sum = ROUND_POWER_OF_TWO(sum, BILINEAR_WARP_PREC_BITS);
+
+      *p = clip_pixel_highbd(sum, bd);
+    }
+  }
+}
+
+#define MAX_LS_DIM 4
+// Swap two rows for Gaussian elimination routine
+void swap_rows(int64_t *mat, int64_t *sol, const int i, const int j,
+               const int dim) {
+  int64_t temp = sol[i];
+  sol[i] = sol[j];
+  sol[j] = temp;
+  for (int col = 0; col < dim; col++) {
+    temp = mat[i * dim + col];
+    mat[i * dim + col] = mat[j * dim + col];
+    mat[j * dim + col] = temp;
+  }
+}
+
+// For better precision, set this number as minimal bits for intermediate
+// result of Gaussian elimination.
+#define GE_MULT_PREC_BITS 12
+
+// Perform Gaussian elimination routine to solve a matrix inverse problem
+int gaussian_elimination(int64_t *mat, int64_t *sol, int *precbits,
+                         const int dim) {
+  int shifts[MAX_LS_DIM] = { 0 };
+  int16_t inv_pivot[MAX_LS_DIM] = { 0 };
+  int16_t inv_pivot_shift[MAX_LS_DIM] = { 0 };
+
+  // Bit range adjustment: add shifts such that the bit depths of shifted mat
+  // and sol elements are capped by K-dim+1. This is because each element of
+  // mat and sol during forward elimination is updated at most dim-1 times.
+  // Each update is a subtraction that can increase the bit depth by 1 at the
+  // extreme case.
+  // Goal: shift Aij by si+sj+e bits, and shift bi by si+e+f bits. These shifts
+  // will satisfy
+  //     1+MSB(Aij)+si+sj+e <= (K-dim+1)-1 unsigned bits
+  //     1+MSB(bi)+si+e+f <= (K-dim+1)-1 unsigned bits
+  //     precbits[i]-f+si <= 0
+  // The last constraint is preferred but not strictly required, since
+  // precbits[i]-f+si shifts will be applied to b at the end. Making all these
+  // shifts negative means there is no loss of precision during the Gaussian
+  // elimination procedure. One quick solution is given as follows:
+  //     si=floor(min(K-dim+1-MSB(Aii), min(MSB(Aii))-MSB(Aii))/2)
+  //     f=max_i(precbits[i]+si)
+  //     e=min(K-dim+1-MSB(bi)-si) - max(precbits[i]+si)
+  int bd_cap = MAX_LS_BITS - dim;
+  int a_extra_shift = 64;
+  int b_extra_shift = -64;
+  int min_diag_msb = 64;
+  int mat_diag_bits[MAX_LS_DIM] = { 0 };
+  int sol_bits[MAX_LS_DIM] = { 0 };
+  for (int i = 0; i < dim; i++) {
+    mat_diag_bits[i] = 1 + get_msb_signed_64(mat[i * dim + i]);
+    min_diag_msb = AVMMIN(min_diag_msb, mat_diag_bits[i]);
+    sol_bits[i] = 1 + get_msb_signed_64(sol[i]);
+  }
+  for (int i = 0; i < dim; i++) {
+    shifts[i] =
+        -(AVMMAX(mat_diag_bits[i] - bd_cap, mat_diag_bits[i] - min_diag_msb) >>
+          1);
+    a_extra_shift = AVMMIN(a_extra_shift, bd_cap - sol_bits[i] - shifts[i]);
+    b_extra_shift = AVMMAX(b_extra_shift, precbits[i] + shifts[i]);
+  }
+  a_extra_shift -= b_extra_shift;
+  for (int i = 0; i < dim; i++) {
+    for (int j = 0; j < dim; j++) {
+      int abits = a_extra_shift + shifts[i] + shifts[j];
+      assert(a_extra_shift < 64);
+      mat[i * dim + j] =
+          abits >= 0 ? (mat[i * dim + j] * (1 << abits))
+                     : ROUND_POWER_OF_TWO_SIGNED_64(mat[i * dim + j], -abits);
+    }
+    int bbits = shifts[i] + a_extra_shift + b_extra_shift;
+    if (bbits >= 0) {
+      assert(bbits < 64);
+      sol[i] = sol[i] * (1 << bbits);
+    } else {
+      assert((-bbits) > 0);
+      assert((-bbits) < 64);
+      sol[i] = ROUND_POWER_OF_TWO_SIGNED_64(sol[i], -bbits);
+    }
+    precbits[i] = precbits[i] - b_extra_shift + shifts[i];
+  }
+
+  // Elimination for the i-th column
+  int64_t diff = 0;
+  for (int i = 0; i < dim; i++) {
+    int64_t pivot = mat[i * dim + i];
+    int idx_pivot = i;
+
+    for (int j = i + 1; j < dim; j++) {
+      int64_t new_pivot = mat[j * dim + i];
+      if (llabs(new_pivot) > llabs(pivot)) {
+        idx_pivot = j;
+        pivot = new_pivot;
+      }
+    }
+
+    // Check singularity
+    if (pivot == 0) return 0;
+
+    // Put the row with the pivot first, and get inverse of the pivot
+    if (i != idx_pivot) swap_rows(mat, sol, i, idx_pivot, dim);
+    inv_pivot[i] = (pivot > 0 ? 1 : -1) *
+                   resolve_divisor_64(llabs(pivot), inv_pivot_shift + i);
+
+    for (int k = i + 1; k < dim; k++) {
+      // Compute Akj = Akj - Aki * Aij / Aii, while keeping all intermediate
+      // result within K bits
+      int msb_ki = get_msb_signed_64(mat[k * dim + i]);
+      int msb_invpiv = get_msb_signed(inv_pivot[i]);
+      // Apply an upshift first if intermediate results will be close to zero.
+      int inc_bits = AVMMAX(
+          0, GE_MULT_PREC_BITS - msb_ki - msb_invpiv + inv_pivot_shift[i]);
+      int fshift = inc_bits;
+      int64_t f = stable_mult_shift(mat[k * dim + i], (int64_t)inv_pivot[i],
+                                    inv_pivot_shift[i] - inc_bits, msb_ki,
+                                    msb_invpiv, MAX_LS_BITS, &fshift);
+      int msb_f = get_msb_signed_64(f);
+      mat[k * dim + i] = 0;
+
+      for (int j = i + 1; j < dim; j++) {
+        int msb_ij = get_msb_signed_64(mat[i * dim + j]);
+        diff = stable_mult_shift(mat[i * dim + j], f, fshift, msb_ij, msb_f,
+                                 MAX_LS_BITS, NULL);
+        mat[k * dim + j] -= diff;
+      }
+      int msb_sol = get_msb_signed_64(sol[i]);
+      diff = stable_mult_shift(sol[i], f, fshift, msb_sol, msb_f, MAX_LS_BITS,
+                               NULL);
+      sol[k] -= diff;
+    }
+  }
+
+  // Backward substitution
+  for (int i = dim - 1; i >= 0; i--) {
+    // To reduce bit depth requirement, do a MSB check and downshift the entire
+    // matrix row: 1+MSB(Aij)+1+MSB(bj) <= K-1-2(3 subtractions), for all i,j.
+    int max_mult_bits = 0;
+    for (int j = i + 1; j < dim; j++)
+      max_mult_bits =
+          AVMMAX(max_mult_bits, 2 + get_msb_signed_64(mat[i * dim + j]) +
+                                    get_msb_signed_64(sol[j]));
+    int redbit = AVMMAX(0, max_mult_bits - MAX_LS_BITS + 3);
+    sol[i] = ROUND_POWER_OF_TWO_SIGNED_64(sol[i], redbit);
+    for (int j = i + 1; j < dim; j++) {
+      diff = ROUND_POWER_OF_TWO_SIGNED_64(mat[i * dim + j], redbit) * sol[j];
+      sol[i] = sol[i] - diff;
+    }
+    sol[i] = stable_mult_shift(sol[i], (int64_t)inv_pivot[i],
+                               inv_pivot_shift[i] - redbit,
+                               get_msb_signed_64(sol[i]),
+                               get_msb_signed(inv_pivot[i]), MAX_LS_BITS, NULL);
+  }
+
+  // Apply remaining downscaling
+  for (int i = 0; i < dim; i++)
+    sol[i] = precbits[i] >= 0
+                 ? (sol[i] * (1 << precbits[i]))
+                 : ROUND_POWER_OF_TWO_SIGNED_64(sol[i], -precbits[i]);
+
+  return 1;
+}
+
+// Solve a 4-dimensional matrix inverse
+int solver_4d(const int32_t *mat_a, const int32_t *vec_b, int *precbits,
+              int *sol) {
+  int64_t mat[16] = { 0 };
+  int64_t vec[4] = { 0 };
+  for (int i = 0; i < 16; i++) mat[i] = (int64_t)mat_a[i];
+  for (int i = 0; i < 4; i++) vec[i] = (int64_t)vec_b[i];
+  int ret = gaussian_elimination(mat, vec, precbits, 4);
+  for (int i = 0; i < 4; i++) sol[i] = (int)vec[i];
+  return ret;
+}
+#endif  // CONFIG_AFFINE_REFINEMENT
+
 // Restrict MV delta. This restriction would reduce complexity in hardware.
 #define OPFL_MV_DELTA_LIMIT (1 << MV_REFINE_PREC_BITS)
 
@@ -932,14 +1244,23 @@ void av2_bilinear_grad_interpolation_c(const int16_t *pred_src, int16_t *x_grad,
 #endif  // OPFL_BILINEAR_GRAD
 
 void av2_compute_subpel_gradients_interp(int16_t *pred_dst, int bw, int bh,
-                                         int *grad_prec_bits, int16_t *x_grad,
-                                         int16_t *y_grad) {
+                                         int *grad_prec_bits,
+#if CONFIG_AFFINE_REFINEMENT_SB
+                                         int use_affine,
+#endif  // CONFIG_AFFINE_REFINEMENT_SB
+                                         int16_t *x_grad, int16_t *y_grad) {
 #if OPFL_BILINEAR_GRAD
   (void)is_hbd;
   av2_bilinear_grad_interpolation_c(pred_dst, x_grad, y_grad, bw, bh);
 #else
   int sub_bw = AVMMIN(OPFL_GRAD_UNIT, bw);
   int sub_bh = AVMMIN(OPFL_GRAD_UNIT, bh);
+#if CONFIG_AFFINE_REFINEMENT_SB
+  if (use_affine) {
+    sub_bw = AVMMIN(AFFINE_MAX_UNIT, bw);
+    sub_bh = AVMMIN(AFFINE_MAX_UNIT, bh);
+  }
+#endif  // CONFIG_AFFINE_REFINEMENT_SB
   for (int i = 0; i < bh; i += sub_bh) {
     for (int j = 0; j < bw; j += sub_bw) {
       // Reuse pixels in pred_dst to compute gradients
@@ -990,6 +1311,231 @@ void av2_avg_pooling_pdiff_gradients_c(int16_t *pdiff, const int pstride,
     }
   }
 }
+
+#if CONFIG_AFFINE_REFINEMENT
+/* Map affine model parameters to warped motion parameters based on signed
+   temporal distance d (positive for past ref, negative for future ref).
+
+   For d < 0, let t = -d > 0, the affine model is
+   /x'\ = / cos(t*theta)  -sin(t*theta) \ * /1+t*alpha   0   \ * /x\ + / t*tx \
+   \y'/   \ sin(t*theta)   cos(t*theta) /   \    0   1+t*beta/   \y/   \ t*ty /
+
+   which is associated with warped motion matrix
+
+        / (1+t*alpha)*cos(t*theta)  -(1+t*beta)*sin(t*theta)  t*tx \
+   A = |  (1+t*alpha)*sin(t*theta)   (1+t*beta)*cos(t*theta)  t*ty  |
+        \            0                         0                1  /
+
+   For d > 0, we let t = d > 0, and the warped motion matrix is given by the
+   inverse matrix of A. Approximate 1/(1+x) by 1-x, then
+
+    -1    / (1-t*alpha)*cos(t*theta)  (1-t*alpha)*sin(t*theta)  tx' \
+   A   = |  -(1-t*beta)*sin(t*theta)  (1-t*beta)*cos(t*theta)   ty'  |
+          \             0                         0              1  /,
+
+   where tx' = -t*(1-t*alpha)*[cos(t*theta)*tx+sin(t*theta)*ty]
+         ty' = t*(1-t*beta)*[cos(t*theta)*tx+sin(t*theta)*ty]
+*/
+void get_ref_affine_params(int bw, int bh, int mi_x, int mi_y,
+                           const AffineModelParams *am_params,
+                           WarpedMotionParams *wm, const int d,
+                           const MV *const mv,
+                           const struct scale_factors *sf) {
+  wm->invalid = 1;
+
+  const int64_t unit_offset = 1 << WARPEDMODEL_PREC_BITS;
+  const int64_t scale_x = unit_offset - d * am_params->scale_alpha;
+  const int64_t scale_y = unit_offset - d * am_params->scale_beta;
+  const int64_t angle = -d * am_params->rot_angle;
+  int64_t cos_angle = unit_offset;
+  int64_t sin_angle = angle * (1 << (WARPEDMODEL_PREC_BITS - AFFINE_PREC_BITS));
+  wm->wmmat[2] = clamp64_to_32(
+      ROUND_POWER_OF_TWO_SIGNED_64(scale_x * cos_angle, WARPEDMODEL_PREC_BITS));
+  wm->wmmat[5] = clamp64_to_32(
+      ROUND_POWER_OF_TWO_SIGNED_64(scale_y * cos_angle, WARPEDMODEL_PREC_BITS));
+  if (d > 0) {
+    // Parameters of A^-1
+    wm->wmmat[3] = clamp64_to_32(ROUND_POWER_OF_TWO_SIGNED_64(
+        -scale_x * sin_angle, WARPEDMODEL_PREC_BITS));
+    wm->wmmat[4] = clamp64_to_32(ROUND_POWER_OF_TWO_SIGNED_64(
+        scale_y * sin_angle, WARPEDMODEL_PREC_BITS));
+    int64_t tmp_tx = (int64_t)wm->wmmat[2] * (int64_t)am_params->tran_x -
+                     (int64_t)wm->wmmat[3] * (int64_t)am_params->tran_y;
+    int64_t tmp_ty = (int64_t)wm->wmmat[4] * (int64_t)am_params->tran_x +
+                     (int64_t)wm->wmmat[5] * (int64_t)am_params->tran_y;
+    wm->wmmat[0] = (int32_t)clamp64(
+        ROUND_POWER_OF_TWO_SIGNED_64(tmp_tx * (-d), WARPEDMODEL_PREC_BITS),
+        -WARPEDMODEL_TRANS_CLAMP,
+        WARPEDMODEL_TRANS_CLAMP - (1 << WARP_PARAM_REDUCE_BITS));
+    wm->wmmat[1] = (int32_t)clamp64(
+        ROUND_POWER_OF_TWO_SIGNED_64(tmp_ty * (-d), WARPEDMODEL_PREC_BITS),
+        -WARPEDMODEL_TRANS_CLAMP,
+        WARPEDMODEL_TRANS_CLAMP - (1 << WARP_PARAM_REDUCE_BITS));
+  } else {
+    // Parameters of A
+    wm->wmmat[3] = clamp64_to_32(ROUND_POWER_OF_TWO_SIGNED_64(
+        -scale_y * sin_angle, WARPEDMODEL_PREC_BITS));
+    wm->wmmat[4] = clamp64_to_32(ROUND_POWER_OF_TWO_SIGNED_64(
+        scale_x * sin_angle, WARPEDMODEL_PREC_BITS));
+    wm->wmmat[0] = (int32_t)clamp64(
+        (int64_t)am_params->tran_x * (-d), -WARPEDMODEL_TRANS_CLAMP,
+        WARPEDMODEL_TRANS_CLAMP - (1 << WARP_PARAM_REDUCE_BITS));
+    wm->wmmat[1] = (int32_t)clamp64(
+        (int64_t)am_params->tran_y * (-d), -WARPEDMODEL_TRANS_CLAMP,
+        WARPEDMODEL_TRANS_CLAMP - (1 << WARP_PARAM_REDUCE_BITS));
+  }
+  wm->wmmat[6] = wm->wmmat[7] = 0;
+
+  av2_reduce_warp_model(wm);
+
+  av2_get_shear_params(wm, sf);
+
+  // Apply offsets based on the coordinate of the block center and the MV to
+  // convert the base point of warped motion from block center to the top-left
+  // pixel of the frame. Note that bw, bh, mi_x, mi_y parameters here
+  // are the block size and top left block coordinates where the parameters were
+  // derived, not necessarily from the current subblock
+  const int center_x = mi_x + bw / 2 - 1;
+  const int center_y = mi_y + bh / 2 - 1;
+  int64_t wmmat0 = (int64_t)wm->wmmat[0] +
+                   (int64_t)mv->col * (1 << (WARPEDMODEL_PREC_BITS - 3)) -
+                   ((int64_t)center_x * (wm->wmmat[2] - unit_offset) +
+                    (int64_t)center_y * wm->wmmat[3]);
+  int64_t wmmat1 = (int64_t)wm->wmmat[1] +
+                   (int64_t)mv->row * (1 << (WARPEDMODEL_PREC_BITS - 3)) -
+                   ((int64_t)center_x * wm->wmmat[4] +
+                    (int64_t)center_y * (wm->wmmat[5] - unit_offset));
+
+  wm->wmmat[0] =
+      (int32_t)clamp64(wmmat0, -WARPEDMODEL_TRANS_CLAMP,
+                       WARPEDMODEL_TRANS_CLAMP - (1 << WARP_PARAM_REDUCE_BITS));
+  wm->wmmat[1] =
+      (int32_t)clamp64(wmmat1, -WARPEDMODEL_TRANS_CLAMP,
+                       WARPEDMODEL_TRANS_CLAMP - (1 << WARP_PARAM_REDUCE_BITS));
+
+  wm->wmtype = AFFINE;
+  wm->invalid = 0;
+}
+
+// Find the maximum element of pdiff/gx/gy in absolute value
+int32_t find_max_matrix_element(const int16_t *pdiff, int pstride,
+                                const int16_t *gx, const int16_t *gy,
+                                int gstride, int bw, int bh) {
+  // TODO(kslu) do it in a better way to remove repeated computations, or
+  // handle this in gradient computation
+  int max_el = 0;
+  for (int i = 0; i < bh; i++) {
+    for (int j = 0; j < bw; j++) {
+      if (AVMMAX(i, j) >= AFFINE_AVG_MAX_SIZE) continue;
+      max_el = AVMMAX(max_el, abs((int)gx[i * gstride + j]));
+      max_el = AVMMAX(max_el, abs((int)gy[i * gstride + j]));
+      max_el = AVMMAX(max_el, abs((int)pdiff[i * pstride + j]));
+    }
+  }
+  return max_el;
+}
+
+// Autocorrelation matrix filling procedure for affine refinement.
+void av2_calc_affine_autocorrelation_matrix_c(const int16_t *pdiff, int pstride,
+                                              const int16_t *gx,
+                                              const int16_t *gy, int gstride,
+                                              int bw, int bh, int32_t *mat_a,
+                                              int32_t *vec_b) {
+  int x_range_log2 = get_msb(bw);
+  int y_range_log2 = get_msb(bh);
+  int step_h = AVMMAX(1, bh >> AFFINE_AVG_MAX_SIZE_LOG2);
+  int step_w = AVMMAX(1, bw >> AFFINE_AVG_MAX_SIZE_LOG2);
+  int npel_log2 = AVMMIN(AFFINE_AVG_MAX_SIZE_LOG2, x_range_log2) +
+                  AVMMIN(AFFINE_AVG_MAX_SIZE_LOG2, y_range_log2);
+  // Check range of gradient and prediction differences. If maximum absolute
+  // value is very large, matrix A is likely to be clamped. To improve
+  // stability, we adaptively reduce the dynamic range here
+  int32_t max_el =
+      find_max_matrix_element(pdiff, pstride, gx, gy, gstride, bw, bh);
+  int max_el_msb = max_el > 0 ? get_msb(max_el) : 0;
+  int grad_bits =
+      AVMMAX(0, max_el_msb * 2 + npel_log2 +
+                    AVMMAX(x_range_log2, y_range_log2) - AFFINE_GRAD_BITS_THR);
+  const int coords_bits = AVMMAX(
+      0, ((x_range_log2 + y_range_log2) >> 1) - AFFINE_COORDS_OFFSET_BITS);
+  for (int i = 0; i < bh; ++i) {
+    for (int j = 0; j < bw; ++j) {
+      if (AVMMAX(i, j) >= AFFINE_AVG_MAX_SIZE) continue;
+      const int x = step_w * j - bw / 2 + 1;
+      const int y = step_h * i - bh / 2 + 1;
+      int gidx = i * gstride + j;
+      int a[4];
+      a[0] =
+          ROUND_POWER_OF_TWO_SIGNED(-gx[gidx] * y + gy[gidx] * x, coords_bits);
+      a[1] =
+          ROUND_POWER_OF_TWO_SIGNED(gx[gidx] * x + gy[gidx] * y, coords_bits);
+      a[2] = gx[gidx];
+      a[3] = gy[gidx];
+      for (int s = 0; s < 4; ++s)
+        a[s] = clamp(a[s], -AFFINE_SAMP_CLAMP_VAL, AFFINE_SAMP_CLAMP_VAL);
+      const int d = clamp(pdiff[i * pstride + j], -AFFINE_SAMP_CLAMP_VAL,
+                          AFFINE_SAMP_CLAMP_VAL);
+      for (int s = 0; s < 4; ++s) {
+        for (int t = 0; t <= s; ++t) {
+          mat_a[s * 4 + t] += ROUND_POWER_OF_TWO_SIGNED(a[s] * a[t], grad_bits);
+        }
+        vec_b[s] += ROUND_POWER_OF_TWO_SIGNED(a[s] * d, grad_bits);
+      }
+    }
+  }
+  for (int s = 0; s < 4; ++s) {
+    for (int t = s + 1; t < 4; ++t) mat_a[s * 4 + t] = mat_a[t * 4 + s];
+  }
+  const int rls_alpha = (bw * bh >> 4) * AFFINE_RLS_PARAM;
+  mat_a[0] += rls_alpha;
+  mat_a[5] += rls_alpha;
+  mat_a[10] += rls_alpha;
+  mat_a[15] += rls_alpha;
+}
+
+// Derivation of four parameters in the rotation-scale-translation affine model
+// (in the pipeline where gradients are computed directly from d0*P0-d1*P1)
+int av2_opfl_affine_refinement(const int16_t *pdiff, int pstride,
+                               const int16_t *gx, const int16_t *gy,
+                               int gstride, int bw, int bh, int grad_prec_bits,
+                               AffineModelParams *am_params) {
+  int32_t mat_a[16] = { 0 };
+  int32_t vec_b[4] = { 0 };
+  int32_t vec_x[4];
+  // This accumulation needs to take into account the offsets relative to the
+  // subblock center. Previous mat_a and vec_b are relative to the centers of
+  // the previous blocks
+  av2_calc_affine_autocorrelation_matrix(pdiff, pstride, gx, gy, gstride, bw,
+                                         bh, mat_a, vec_b);
+
+  const int coords_bits =
+      AVMMAX(0, ((get_msb(bw) + get_msb(bh)) >> 1) - AFFINE_COORDS_OFFSET_BITS);
+
+  int prec_bits[4] = {
+    grad_prec_bits + AFFINE_PREC_BITS - coords_bits,
+    grad_prec_bits + AFFINE_PREC_BITS - coords_bits,
+    grad_prec_bits + AFFINE_PREC_BITS,
+    grad_prec_bits + AFFINE_PREC_BITS,
+  };
+  if (!solver_4d(mat_a, vec_b, prec_bits, vec_x)) return 1;
+
+  assert(WARPEDMODEL_PREC_BITS - AFFINE_PREC_BITS >= 0);
+  am_params->rot_angle = vec_x[0];
+  am_params->scale_alpha = (int)clamp64(
+      (int64_t)vec_x[1] * (1 << (WARPEDMODEL_PREC_BITS - AFFINE_PREC_BITS)),
+      INT32_MIN, INT32_MAX);
+  am_params->scale_beta = (int)clamp64(
+      (int64_t)vec_x[1] * (1 << (WARPEDMODEL_PREC_BITS - AFFINE_PREC_BITS)),
+      INT32_MIN, INT32_MAX);
+  am_params->tran_x = (int)clamp64(
+      (int64_t)vec_x[2] * (1 << (WARPEDMODEL_PREC_BITS - AFFINE_PREC_BITS)),
+      INT32_MIN, INT32_MAX);
+  am_params->tran_y = (int)clamp64(
+      (int64_t)vec_x[3] * (1 << (WARPEDMODEL_PREC_BITS - AFFINE_PREC_BITS)),
+      INT32_MIN, INT32_MAX);
+  return 0;
+}
+#endif  // CONFIG_AFFINE_REFINEMENT
 
 void calc_mv_process(int32_t su2, int32_t sv2, int32_t suv, int32_t suw,
                      int32_t svw, const int d0, const int d1, const int bits,
@@ -1113,6 +1659,116 @@ int av2_opfl_mv_refinement_nxn_c(const int16_t *pdiff, int pstride,
   return n_blocks;
 }
 
+#if CONFIG_AFFINE_REFINEMENT
+// Helper function for recursively code DAMR subblocks until the subblock size
+// reaches 16x16
+void process_affine_refinement_subblock(int16_t *pdiff, int pstride,
+                                        int16_t *gx, int16_t *gy, int gstride,
+                                        int bw, int bh, int d0, int d1,
+                                        int mi_x, int mi_y,
+                                        WarpedMotionParams *wms, int wms_stride,
+                                        const MV *const src_mv,
+                                        const struct scale_factors *sf[2],
+                                        int grad_prec_bits) {
+  (void)wms_stride;
+  av2_avg_pooling_pdiff_gradients(pdiff, pstride, gx, gy, gstride, bw, bh,
+                                  AFFINE_AVG_MAX_SIZE);
+
+  AffineModelParams affine_params = default_affine_params;
+  // In some rare cases, the determinant in the solver may be zero or
+  // negative due to numerical errors. In this case we still set invalid=0,
+  // but the warped parameters remain the default values.
+  if (!av2_opfl_affine_refinement(pdiff, pstride, gx, gy, gstride, bw, bh,
+                                  grad_prec_bits, &affine_params)) {
+    get_ref_affine_params(bw, bh, mi_x, mi_y, &affine_params, wms, d0,
+                          &src_mv[0], sf[0]);
+    get_ref_affine_params(bw, bh, mi_x, mi_y, &affine_params, wms + 1, d1,
+                          &src_mv[1], sf[1]);
+  }
+}
+
+// Solve the affine model given pdiff = P0 - P1 and the gradients gx/gy of
+// d0 * P0 - d1 * P1.
+void av2_opfl_affine_refinement_mxn(int16_t *pdiff, int pstride, int16_t *gx,
+                                    int16_t *gy, int gstride, int bw, int bh,
+                                    int d0, int d1, int mi_x, int mi_y,
+                                    const MV *const src_mv, int grad_prec_bits,
+                                    WarpedMotionParams *wms,
+                                    const struct scale_factors *sf[2]) {
+  int n_blocks = 0;
+#if CONFIG_AFFINE_REFINEMENT_SB
+  int sub_bw = AVMMIN(AFFINE_MAX_UNIT, bw);
+  int sub_bh = AVMMIN(AFFINE_MAX_UNIT, bh);
+#else
+  int sub_bw = bw;
+  int sub_bh = bh;
+#endif  // CONFIG_AFFINE_REFINEMENT_SB
+  int wms_stride = bw / sub_bw;
+  for (int i = 0; i < bh; i += sub_bh) {
+    for (int j = 0; j < bw; j += sub_bw) {
+      process_affine_refinement_subblock(
+          pdiff + i * pstride + j, pstride, gx + i * gstride + j,
+          gy + i * gstride + j, gstride, sub_bw, sub_bh, d0, d1, mi_x + j,
+          mi_y + i, wms + n_blocks * 2, wms_stride, src_mv, sf, grad_prec_bits);
+      n_blocks++;
+    }
+  }
+}
+
+// Update predicted blocks (P0 & P1) and their gradients based on the affine
+// model derived from the first DAMR step
+void update_pred_grad_with_affine_model(
+    MACROBLOCKD *xd, int plane, int bw, int bh, WarpedMotionParams *wms,
+    int mi_x, int mi_y, int16_t *tmp0, int16_t *tmp1, int16_t *gx0,
+    int16_t *gy0, const int d0, const int d1, int *grad_prec_bits,
+    const AV2_COMMON *cm, MB_MODE_INFO *mi, int pu_width, int pu_height) {
+  DECLARE_ALIGNED(32, uint16_t, dst_warped[2 * MAX_SB_SIZE * MAX_SB_SIZE]);
+  struct macroblockd_plane *const pd = &xd->plane[plane];
+  ConvolveParams conv_params =
+      get_conv_params_no_round(0, plane, NULL, 0, 0, xd->bd);
+
+  for (int ref = 0; ref < 2; ref++) {
+    struct buf_2d *const pre_buf = &pd->pre[ref];
+#if CONFIG_AFFINE_REFINEMENT_SB
+    int sub_bw = AVMMIN(AFFINE_MAX_UNIT, bw);
+    int sub_bh = AVMMIN(AFFINE_MAX_UNIT, bh);
+    int nb = 0;
+    for (int i = 0; i < bh; i += sub_bh) {
+      for (int j = 0; j < bw; j += sub_bw) {
+        ReferenceArea ref_area_damr_intermediate;
+        av2_get_reference_area_with_padding_single(
+            cm, xd, plane, mi, mi->mv[ref].as_mv, sub_bw, sub_bh, mi_x + j,
+            mi_y + i, &ref_area_damr_intermediate.pad_block, pu_width,
+            pu_height, ref, 0);
+        ref_area_damr_intermediate.paded_ref_buf_stride = REF_BUFFER_WIDTH;
+        av2_warp_plane_bilinear(
+            wms + 2 * nb + ref, xd->bd, pre_buf->buf0, pre_buf->width,
+            pre_buf->height, pre_buf->stride,
+            &dst_warped[ref * bw * bh + i * bw + j], mi_x + j, mi_y + i, sub_bw,
+            sub_bh, bw, pd->subsampling_x, pd->subsampling_y, &conv_params,
+            &ref_area_damr_intermediate.pad_block);
+        nb++;
+      }
+    }
+#else
+    av2_warp_plane_bilinear(&wms[ref], xd->bd, pre_buf->buf0, pre_buf->width,
+                            pre_buf->height, pre_buf->stride,
+                            &dst_warped[ref * bw * bh], mi_x, mi_y, bw, bh, bw,
+                            pd->subsampling_x, pd->subsampling_y, &conv_params,
+                            NULL);
+#endif  // CONFIG_AFFINE_REFINEMENT_SB
+  }
+  av2_copy_pred_array_highbd(&dst_warped[0], &dst_warped[bw * bh], bw, tmp0,
+                             tmp1, bw, bh, d0, d1, xd->bd, 0);
+  // Buffers gx0 and gy0 are used to store the gradients of tmp0
+  av2_compute_subpel_gradients_interp(tmp0, bw, bh, grad_prec_bits,
+#if CONFIG_AFFINE_REFINEMENT_SB
+                                      1,
+#endif  // CONFIG_AFFINE_REFINEMENT_SB
+                                      gx0, gy0);
+}
+#endif  // CONFIG_AFFINE_REFINEMENT
+
 static AVM_FORCE_INLINE void compute_pred_using_interp_grad_highbd(
     const uint16_t *src1, const uint16_t *src2, int src_stride, int16_t *dst1,
     int16_t *dst2, int bw, int bh, int d0, int d1, int bd, int centered) {
@@ -1143,15 +1799,22 @@ void av2_copy_pred_array_highbd_c(const uint16_t *src1, const uint16_t *src2,
 }
 
 void av2_get_optflow_based_mv(const AV2_COMMON *cm, MACROBLOCKD *xd, int plane,
-                              const MB_MODE_INFO *mbmi, int_mv *mv_refined,
+                              MB_MODE_INFO *mbmi, int_mv *mv_refined,
                               int bw, int bh, int mi_x, int mi_y,
                               int build_for_decode, uint16_t **mc_buf,
                               CalcSubpelParamsFunc calc_subpel_params_func,
                               int16_t *gx0, int16_t *gy0, int16_t *gx1,
-                              int16_t *gy1, int *vx0, int *vy0, int *vx1,
+                              int16_t *gy1,
+#if CONFIG_AFFINE_REFINEMENT
+                              WarpedMotionParams *wms, int *use_affine_opfl,
+#endif  // CONFIG_AFFINE_REFINEMENT
+                              int *vx0, int *vy0, int *vx1,
                               int *vy1, uint16_t *dst0, uint16_t *dst1,
                               int dst_stride, int do_pred, int use_4x4,
                               MV *best_mv_ref, int pu_width, int pu_height) {
+#if CONFIG_AFFINE_REFINEMENT
+  *use_affine_opfl = 0;
+#endif  // CONFIG_AFFINE_REFINEMENT
   const int target_prec = MV_REFINE_PREC_BITS;
   const int n = opfl_get_subblock_size(bw, bh, plane, use_4x4);
   int n_blocks = (bw / n) * (bh / n);
@@ -1228,14 +1891,52 @@ void av2_get_optflow_based_mv(const AV2_COMMON *cm, MACROBLOCKD *xd, int plane,
   DECLARE_ALIGNED(32, int16_t, tmp1[MAX_SB_SIZE * MAX_SB_SIZE]);
   av2_copy_pred_array_highbd(dst0, dst1, dst_stride, tmp0, tmp1, bw, bh, d0, d1,
                              xd->bd, 0);
+#if CONFIG_AFFINE_REFINEMENT
+  if (mbmi->comp_refine_type >= COMP_AFFINE_REFINE_START && wms)
+    *use_affine_opfl = 1;
+#endif  // CONFIG_AFFINE_REFINEMENT
+
   // Buffers gx0 and gy0 are used to store the
   // gradients of tmp0
-  av2_compute_subpel_gradients_interp(tmp0, bw, bh, &grad_prec_bits, gx0, gy0);
+  av2_compute_subpel_gradients_interp(tmp0, bw, bh, &grad_prec_bits,
+#if CONFIG_AFFINE_REFINEMENT_SB
+                                      *use_affine_opfl,
+#endif  // CONFIG_AFFINE_REFINEMENT_SB
+                                      gx0, gy0);
 
+#if CONFIG_AFFINE_REFINEMENT
+  const struct scale_factors *sf[2];
+  sf[0] = get_ref_scale_factors_const(cm, mbmi->ref_frame[0]);
+  sf[1] = get_ref_scale_factors_const(cm, mbmi->ref_frame[1]);
+  if (mbmi->comp_refine_type >= COMP_AFFINE_REFINE_START && wms &&
+      *use_affine_opfl) {
+    av2_opfl_affine_refinement_mxn(tmp1, bw, gx0, gy0, bw, bw, bh, d0, d1, mi_x,
+                                   mi_y, best_mv_ref, grad_prec_bits, wms, sf);
+
+    update_pred_grad_with_affine_model(xd, plane, bw, bh, wms, mi_x, mi_y, tmp0,
+                                       tmp1, gx0, gy0, d0, d1, &grad_prec_bits,
+                                       cm, mbmi, pu_width, pu_height);
+
+    // Subblock wise translational refinement
+    if (damr_refine_subblock(plane, bw, bh, mbmi->comp_refine_type, n, n)) {
+      // Find translational parameters per subblock.
+      n_blocks = av2_opfl_mv_refinement_nxn(
+          tmp1, bw, gx0, gy0, bw, bw, bh, n, d0, d1, grad_prec_bits,
+          target_prec, mi_x, mi_y, cm->mi_params.mi_cols, cm->mi_params.mi_rows,
+          build_for_decode, vx0, vy0, vx1, vy1);
+    }
+  } else {
+    n_blocks = av2_opfl_mv_refinement_nxn(
+        tmp1, bw, gx0, gy0, bw, bw, bh, n, d0, d1, grad_prec_bits, target_prec,
+        mi_x, mi_y, cm->mi_params.mi_cols, cm->mi_params.mi_rows,
+        build_for_decode, vx0, vy0, vx1, vy1);
+  }
+#else
   n_blocks = av2_opfl_mv_refinement_nxn(
       tmp1, bw, gx0, gy0, bw, bw, bh, n, d0, d1, grad_prec_bits, target_prec,
       mi_x, mi_y, cm->mi_params.mi_cols, cm->mi_params.mi_rows,
       build_for_decode, vx0, vy0, vx1, vy1);
+#endif  // CONFIG_AFFINE_REFINEMENT
 
   for (int i = 0; i < n_blocks; i++) {
     vy0[i] = clamp(vy0[i], -OPFL_MV_DELTA_LIMIT, OPFL_MV_DELTA_LIMIT);
@@ -1505,11 +2206,26 @@ void make_inter_pred_of_nxn(
     uint16_t *dst, int dst_stride, int_mv *const mv_refined,
     InterPredParams *inter_pred_params, MACROBLOCKD *xd, int mi_x, int mi_y,
     int build_for_decode, const AV2_COMMON *cm, int pu_width, int plane,
+#if CONFIG_AFFINE_REFINEMENT
+    int *vxy_bufs, const int vxy_size, CompoundRefineType comp_refine_type,
+    WarpedMotionParams *wms, int_mv *mv, const int use_affine_opfl,
+#endif  // CONFIG_AFFINE_REFINEMENT
     int ref, uint16_t **mc_buf, CalcSubpelParamsFunc calc_subpel_params_func,
     int use_4x4, SubpelParams *subpel_params, MB_MODE_INFO *mi, int pu_height,
-    const MV mi_mv[2], int use_sub_pad) {
+    const MV mi_mv[2], int use_sub_pad
+#if CONFIG_AFFINE_REFINEMENT
+    ,
+    int use_sub_pad_warp
+#endif  // CONFIG_AFFINE_REFINEMENT
+) {
   int opfl_sub_bw = OF_BSIZE;
   int opfl_sub_bh = OF_BSIZE;
+#if CONFIG_AFFINE_REFINEMENT
+  const int is_subsampling_422 =
+      plane && (xd->plane[plane].subsampling_x == 1 &&
+                xd->plane[plane].subsampling_y == 0);
+  (void)mv;
+#endif  // CONFIG_AFFINE_REFINEMENT
   opfl_subblock_size_plane(xd, plane, use_4x4, &opfl_sub_bw, &opfl_sub_bh);
 
   int n_blocks = 0;
@@ -1517,6 +2233,15 @@ void make_inter_pred_of_nxn(
   int bh = inter_pred_params->orig_block_height;
   int sub_bw = opfl_sub_bw;
   int sub_bh = opfl_sub_bh;
+#if CONFIG_AFFINE_REFINEMENT
+  MV ref_mv = mv_refined[ref].as_mv;
+  if (comp_refine_type >= COMP_AFFINE_REFINE_START &&
+      !damr_refine_subblock(plane, bw, bh, comp_refine_type, sub_bw, sub_bh)) {
+    sub_bw = bw;
+    sub_bh = bh;
+  }
+  const int unit_offset = 1 << WARPEDMODEL_PREC_BITS;
+#endif  // CONFIG_AFFINE_REFINEMENT
   assert(bw % sub_bw == 0);
   assert(bh % sub_bh == 0);
   CONV_BUF_TYPE *orig_conv_dst = inter_pred_params->conv_params.dst;
@@ -1526,6 +2251,19 @@ void make_inter_pred_of_nxn(
   MV subblock_mv = { 0, 0 };
   uint16_t *pre;
   int src_stride = 0;
+#if CONFIG_AFFINE_REFINEMENT
+#if CONFIG_AFFINE_REFINEMENT_SB
+  int sb_idx = 0;
+  int affine_sub_bw =
+      AVMMIN(AFFINE_MAX_UNIT >> inter_pred_params->subsampling_x, bw);
+  int affine_sub_bh =
+      AVMMIN(AFFINE_MAX_UNIT >> inter_pred_params->subsampling_y, bh);
+  int wms_stride = bw / affine_sub_bw;
+#endif  // CONFIG_AFFINE_REFINEMENT_SB
+
+  int *vx = &vxy_bufs[vxy_size * ref];
+  int *vy = &vxy_bufs[vxy_size * (2 + ref)];
+#endif  // CONFIG_AFFINE_REFINEMENT
 
   const int mi_row = -xd->mb_to_top_edge >> MI_SUBPEL_SIZE_LOG2;
   const int mi_col = -xd->mb_to_left_edge >> MI_SUBPEL_SIZE_LOG2;
@@ -1537,6 +2275,9 @@ void make_inter_pred_of_nxn(
   // Process whole nxn blocks.
   for (int j = 0; j < bh; j += sub_bh) {
     for (int i = 0; i < bw; i += sub_bw) {
+#if CONFIG_AFFINE_REFINEMENT
+      int delta_idx = (j / sub_bh) * (pu_width / sub_bw) + (i / sub_bw);
+#endif  // CONFIG_AFFINE_REFINEMENT
       ReferenceArea ref_area_opfl;
       if (use_sub_pad && (plane || (sub_bh >= 8 && sub_bw >= 8))) {
         av2_get_reference_area_with_padding_single(
@@ -1546,8 +2287,18 @@ void make_inter_pred_of_nxn(
             &ref_area_opfl.pad_block, pu_width, pu_height, ref, 0);
         ref_area_opfl.paded_ref_buf_stride = REF_BUFFER_WIDTH;
         inter_pred_params->use_ref_padding = 1;
+#if CONFIG_AFFINE_REFINEMENT
+        inter_pred_params->use_damr_padding = 1;
+#endif  // CONFIG_AFFINE_REFINEMENT
         inter_pred_params->ref_area = &ref_area_opfl;
       }
+#if CONFIG_AFFINE_REFINEMENT
+      inter_pred_params->use_warp_bd_damr = 0;
+      inter_pred_params->warp_bd_box_damr.x0 = 0;
+      inter_pred_params->warp_bd_box_damr.y0 = 0;
+      inter_pred_params->warp_bd_box_damr.x1 = cm->width;
+      inter_pred_params->warp_bd_box_damr.y1 = cm->height;
+#endif  // CONFIG_AFFINE_REFINEMENT
       const int x = mi_x + MI_SIZE * col_start +
                     i * (1 << inter_pred_params->subsampling_x);
       const int y = mi_y + MI_SIZE * row_start +
@@ -1560,28 +2311,131 @@ void make_inter_pred_of_nxn(
         inter_pred_params->pix_col += sub_bw;
         continue;
       }
-      if (bw == 4 && bh == 4 && sub_bw == 4 && sub_bh == 4 &&
-          inter_pred_params->subsampling_x &&
-          inter_pred_params->subsampling_y) {
-        // In 420, a 8x8 luma block (consisting of 4 4x4 subblocks with refined
-        // MVs stored in mv_refined[i*2+ref] with i=0,1,2,3) has a 4x4 colocated
-        // chroma. This 4x4 chroma block would reuse the top-left luma refined
-        // MV (i=0) of its 8x8 colocated luma region without any latency issue
-        // in hardware implementation.
-        subblock_mv = mv_refined[ref].as_mv;
-      } else if (bw == 4 && bh == 8 && sub_bw == 4 && sub_bh == 4 &&
-                 inter_pred_params->subsampling_x &&
-                 !inter_pred_params->subsampling_y) {
-        // In 422, a 8x8 luma block (consisting of 4 4x4 subblocks with refined
-        // MVs stored in mv_refined[i*2+ref] with i=0,1,2,3) has a 4x8 colocated
-        // chroma that consists of two 4x4 chroma subblocks. Each 4x4 chroma
-        // would reuse the left luma refined MV (i=0 or 2) of its 8x4 colocated
-        // luma region without any latency issue in hardware implementation.
-        const int sub_idx = n_blocks * 2;
-        subblock_mv = mv_refined[sub_idx * 2 + ref].as_mv;
+#if CONFIG_AFFINE_REFINEMENT
+#if CONFIG_AFFINE_REFINEMENT_SB
+      // Identify warped parameter to used for this nxn subblock
+      sb_idx = (j / affine_sub_bh) * wms_stride + (i / affine_sub_bw);
+      WarpedMotionParams *wms_sb = wms ? (wms + 2 * sb_idx) : NULL;
+#else
+      WarpedMotionParams *wms_sb = wms;
+#endif  // CONFIG_AFFINE_REFINEMENT_SB
+      if (wms_sb && comp_refine_type >= COMP_AFFINE_REFINE_START &&
+          use_affine_opfl) {
+        // If warped model is not valid, wmmat[0] and wmmat[1] remain the
+        // translational offset parameters in block-relative coordinates. Here
+        // they are applied as MV offsets for simple translational prediction
+        WarpedMotionParams this_wm = wms_sb[ref];
+        if (this_wm.invalid) {
+          // When warp prediction is not allowed, apply translational prediction
+          // based on warp parameters
+          inter_pred_params->mode = TRANSLATION_PRED;
+          MV cur_mv = ref_mv;
+          WarpedMotionParams ref_wm =
+              wms_sb ? wms_sb[ref] : default_warp_params;
+          // Apply offsets based on current subblock center position
+          const int subblk_center_x = (i + sub_bw / 2 - 1)
+                                      << inter_pred_params->subsampling_x;
+          const int subblk_center_y = (j + sub_bh / 2 - 1)
+                                      << inter_pred_params->subsampling_y;
+          const int32_t max_value =
+              INT32_MAX - (WARPEDMODEL_PREC_BITS - MV_REFINE_PREC_BITS);
+          const int32_t min_value = -max_value - 1;
+          const int32_t subblk_offset_x_hp = (int32_t)clamp64(
+              (int64_t)subblk_center_x * (ref_wm.wmmat[2] - unit_offset) +
+                  (int64_t)subblk_center_y * ref_wm.wmmat[3],
+              min_value, max_value);
+          const int32_t subblk_offset_y_hp = (int32_t)clamp64(
+              (int64_t)subblk_center_x * ref_wm.wmmat[4] +
+                  (int64_t)subblk_center_y * (ref_wm.wmmat[5] - unit_offset),
+              min_value, max_value);
+          cur_mv.col += ROUND_POWER_OF_TWO_SIGNED(
+              subblk_offset_x_hp, WARPEDMODEL_PREC_BITS - MV_REFINE_PREC_BITS);
+          cur_mv.row += ROUND_POWER_OF_TWO_SIGNED(
+              subblk_offset_y_hp, WARPEDMODEL_PREC_BITS - MV_REFINE_PREC_BITS);
+          subblock_mv = cur_mv;
+          subblock_mv.col = clamp(subblock_mv.col, MV_LOW + 1, MV_UPP - 1);
+          subblock_mv.row = clamp(subblock_mv.row, MV_LOW + 1, MV_UPP - 1);
+        } else {
+          // Overwrite inter_pred_params to trigger warped prediction in
+          // av2_make_inter_predictor()
+          PadBlock warp_bd_box;
+          if ((use_sub_pad_warp && (sub_bh < 8 || sub_bw < 8)) ||
+              !this_wm.use_affine_filter) {
+            av2_get_reference_area_with_padding_single(
+                cm, xd, plane, mi, mi_mv[ref], sub_bw, sub_bh,
+                mi_x + (i << inter_pred_params->subsampling_x),
+                mi_y + (j << inter_pred_params->subsampling_y), &warp_bd_box,
+                pu_width, pu_height, ref, 1);
+            inter_pred_params->use_warp_bd_damr = 1;
+            inter_pred_params->warp_bd_box_damr = warp_bd_box;
+          }
+          inter_pred_params->mode = WARP_PRED;
+          inter_pred_params->warp_params = this_wm;
+          if (comp_refine_type == COMP_REFINE_ROTZOOM4P_SUBBLK2P) {
+            // If this is a 4x4 colocated chroma block of a 8x8 luma block,
+            // colocated subblocks will be 2x2. In this case we take the average
+            // of 4 refined MVs and use it to refine prediction at 4x4 level.
+            if (bw == 4 && bh == 4 && sub_bw == 4 && sub_bh == 4) {
+              inter_pred_params->warp_params.wmmat[0] +=
+                  (vx[0] + vx[1] + vx[2] + vx[3]) *
+                  (1 << (WARPEDMODEL_PREC_BITS - MV_REFINE_PREC_BITS - 2));
+              inter_pred_params->warp_params.wmmat[1] +=
+                  (vy[0] + vy[1] + vy[2] + vy[3]) *
+                  (1 << (WARPEDMODEL_PREC_BITS - MV_REFINE_PREC_BITS - 2));
+            } else if (bw == 4 && bh == 8 && sub_bw == 4 && sub_bh == 4 &&
+                       is_subsampling_422) {
+              inter_pred_params->warp_params.wmmat[0] +=
+                  (vx[delta_idx * 2] + vx[(delta_idx * 2) + 1]) *
+                  (1 << (WARPEDMODEL_PREC_BITS - MV_REFINE_PREC_BITS - 1));
+              inter_pred_params->warp_params.wmmat[1] +=
+                  (vy[delta_idx * 2] + vy[(delta_idx * 2) + 1]) *
+                  (1 << (WARPEDMODEL_PREC_BITS - MV_REFINE_PREC_BITS - 1));
+            } else {
+              inter_pred_params->warp_params.wmmat[0] +=
+                  vx[delta_idx] *
+                  (1 << (WARPEDMODEL_PREC_BITS - MV_REFINE_PREC_BITS));
+              inter_pred_params->warp_params.wmmat[1] +=
+                  vy[delta_idx] *
+                  (1 << (WARPEDMODEL_PREC_BITS - MV_REFINE_PREC_BITS));
+            }
+            inter_pred_params->warp_params.wmmat[0] =
+                clamp(inter_pred_params->warp_params.wmmat[0],
+                      -WARPEDMODEL_TRANS_CLAMP,
+                      WARPEDMODEL_TRANS_CLAMP - (1 << WARP_PARAM_REDUCE_BITS));
+            inter_pred_params->warp_params.wmmat[1] =
+                clamp(inter_pred_params->warp_params.wmmat[1],
+                      -WARPEDMODEL_TRANS_CLAMP,
+                      WARPEDMODEL_TRANS_CLAMP - (1 << WARP_PARAM_REDUCE_BITS));
+          }
+          subblock_mv = mv_refined[n_blocks * 2 + ref].as_mv;
+        }
       } else {
-        subblock_mv = mv_refined[n_blocks * 2 + ref].as_mv;
+#endif  // CONFIG_AFFINE_REFINEMENT
+        if (bw == 4 && bh == 4 && sub_bw == 4 && sub_bh == 4 &&
+            inter_pred_params->subsampling_x &&
+            inter_pred_params->subsampling_y) {
+          // In 420, a 8x8 luma block (consisting of 4 4x4 subblocks with refined
+          // MVs stored in mv_refined[i*2+ref] with i=0,1,2,3) has a 4x4 colocated
+          // chroma. This 4x4 chroma block would reuse the top-left luma refined
+          // MV (i=0) of its 8x8 colocated luma region without any latency issue
+          // in hardware implementation.
+          subblock_mv = mv_refined[ref].as_mv;
+        } else if (bw == 4 && bh == 8 && sub_bw == 4 && sub_bh == 4 &&
+                   inter_pred_params->subsampling_x &&
+                   !inter_pred_params->subsampling_y) {
+          // In 422, a 8x8 luma block (consisting of 4 4x4 subblocks with refined
+          // MVs stored in mv_refined[i*2+ref] with i=0,1,2,3) has a 4x8 colocated
+          // chroma that consists of two 4x4 chroma subblocks. Each 4x4 chroma
+          // would reuse the left luma refined MV (i=0 or 2) of its 8x4 colocated
+          // luma region without any latency issue in hardware implementation.
+          const int sub_idx = n_blocks * 2;
+          subblock_mv = mv_refined[sub_idx * 2 + ref].as_mv;
+        } else {
+          subblock_mv = mv_refined[n_blocks * 2 + ref].as_mv;
+        }
+#if CONFIG_AFFINE_REFINEMENT
       }
+#endif  // CONFIG_AFFINE_REFINEMENT
 
       calc_subpel_params_func(&subblock_mv, inter_pred_params, xd, mi_x + i,
                               mi_y + j, ref, 1, mc_buf, &pre, subpel_params,
@@ -1659,16 +2513,34 @@ void make_inter_pred_of_nxn(
 void av2_opfl_rebuild_inter_predictor(
     uint16_t *dst, int dst_stride, int plane, int_mv *const mv_refined,
     InterPredParams *inter_pred_params, MACROBLOCKD *xd, int mi_x, int mi_y,
-    int build_for_decode, const AV2_COMMON *cm, int pu_width, int ref,
-    uint16_t **mc_buf, CalcSubpelParamsFunc calc_subpel_params_func,
+    int build_for_decode, const AV2_COMMON *cm, int pu_width,
+#if CONFIG_AFFINE_REFINEMENT
+    int *vxy_bufs, const int vxy_size, CompoundRefineType comp_refine_type,
+    WarpedMotionParams *wms, int_mv *mv, const int use_affine_opfl,
+#endif  // CONFIG_AFFINE_REFINEMENT
+    int ref, uint16_t **mc_buf, CalcSubpelParamsFunc calc_subpel_params_func,
     int use_4x4, MB_MODE_INFO *mi, int pu_height, const MV mi_mv[2],
-    int use_sub_pad) {
+    int use_sub_pad
+#if CONFIG_AFFINE_REFINEMENT
+    ,
+    int use_sub_pad_warp
+#endif  // CONFIG_AFFINE_REFINEMENT
+) {
   SubpelParams subpel_params;
 
-  make_inter_pred_of_nxn(dst, dst_stride, mv_refined, inter_pred_params, xd,
-                         mi_x, mi_y, build_for_decode, cm, pu_width, plane, ref,
-                         mc_buf, calc_subpel_params_func, use_4x4,
-                         &subpel_params, mi, pu_height, mi_mv, use_sub_pad);
+  make_inter_pred_of_nxn(
+      dst, dst_stride, mv_refined, inter_pred_params, xd, mi_x, mi_y,
+      build_for_decode, cm, pu_width, plane,
+#if CONFIG_AFFINE_REFINEMENT
+      vxy_bufs, vxy_size, comp_refine_type, wms, mv, use_affine_opfl,
+#endif  // CONFIG_AFFINE_REFINEMENT
+      ref, mc_buf, calc_subpel_params_func, use_4x4, &subpel_params, mi,
+      pu_height, mi_mv, use_sub_pad
+#if CONFIG_AFFINE_REFINEMENT
+      ,
+      use_sub_pad_warp
+#endif  // CONFIG_AFFINE_REFINEMENT
+  );
 }
 
 void av2_build_one_inter_predictor(
@@ -2913,9 +3785,18 @@ static AVM_INLINE int is_sub_block_refinemv_enabled(const AV2_COMMON *cm,
     return (cm->has_both_sides_refs && tip_weight == TIP_EQUAL_WTD);
   } else {
     int apply_sub_block_refinemv =
-        mi->refinemv_flag && !is_tip_ref_frame(mi->ref_frame[0]);
+        mi->refinemv_flag &&
+#if CONFIG_AFFINE_REFINEMENT
+        (is_damr_allowed_with_refinemv(mi->mode) ||
+         mi->comp_refine_type < COMP_AFFINE_REFINE_START) &&
+#endif  // CONFIG_AFFINE_REFINEMENT
+        !is_tip_ref_frame(mi->ref_frame[0]);
 
+#if CONFIG_AFFINE_REFINEMENT
+    if (apply_sub_block_refinemv && default_refinemv_modes(cm, mi))
+#else
     if (apply_sub_block_refinemv && default_refinemv_modes(mi))
+#endif  // CONFIG_AFFINE_REFINEMENT
       apply_sub_block_refinemv &=
           (mi->comp_group_idx == 0 &&
            mi->interinter_comp.type == COMPOUND_AVERAGE);
@@ -2958,6 +3839,9 @@ static AVM_INLINE int skip_opfl_refine_with_tip(
     mbmi.interinter_comp.type = COMPOUND_AVERAGE;
     mbmi.max_mv_precision = MV_PRECISION_ONE_EIGHTH_PEL;
     mbmi.pb_mv_precision = MV_PRECISION_ONE_EIGHTH_PEL;
+#if CONFIG_AFFINE_REFINEMENT
+    mbmi.comp_refine_type = COMP_REFINE_SUBBLK2P;
+#endif  // CONFIG_AFFINE_REFINEMENT
     mbmi.morph_pred = 0;
 
     assert(dst_stride == bw);
@@ -3079,7 +3963,23 @@ static void build_inter_predictors_8x8_and_bigger_refinemv(
   const int sb_cols = bw / sub_bw;
   const int n_blocks = sb_rows * sb_cols;
 
+#if CONFIG_AFFINE_REFINEMENT
+  int use_affine_opfl = use_optflow_refinement &&
+                        is_damr_allowed_with_refinemv(mi->mode) &&
+                        mi->comp_refine_type >= COMP_AFFINE_REFINE_START;
+  WarpedMotionParams wms[2];
+  wms[0] = wms[1] = default_warp_params;
+  const int wms_stride = pu_width / bw;
+  const int sb_idx = (subblk_start_y / bh) * wms_stride + subblk_start_x / bw;
+#endif  // CONFIG_AFFINE_REFINEMENT
+
   if (use_optflow_refinement && plane) {
+#if CONFIG_AFFINE_REFINEMENT
+    if (use_affine_opfl) {
+      use_affine_opfl = xd->use_affine_opfl;
+      memcpy(wms, xd->wm_params_sb + 2 * sb_idx, 2 * sizeof(wms[0]));
+    }
+#endif  // CONFIG_AFFINE_REFINEMENT
     // Optical flow refined luma MVs are reused for chroma
     for (int i = 0; i < sb_rows; i++) {
       for (int j = 0; j < sb_cols; j++) {
@@ -3139,6 +4039,9 @@ static void build_inter_predictors_8x8_and_bigger_refinemv(
       av2_get_optflow_based_mv(
           cm, xd, plane, mi, mv_refined_sb, bw, bh, mi_x, mi_y,
           build_for_decode, mc_buf, calc_subpel_params_func, gx0, gy0, gx1, gy1,
+#if CONFIG_AFFINE_REFINEMENT
+          use_affine_opfl ? wms : NULL, &use_affine_opfl,
+#endif  // CONFIG_AFFINE_REFINEMENT
           vx0_sb, vy0_sb, vx1_sb, vy1_sb, dst0, dst1, opfl_dst_stride, do_pred,
           use_4x4, best_mv_ref, pu_width, pu_height);
       for (int i = 0; i < sb_rows; i++) {
@@ -3156,6 +4059,10 @@ static void build_inter_predictors_8x8_and_bigger_refinemv(
           opfl_vxy_bufs[N_OF_OFFSETS * 3 + mvidx] = vy1_sb[mvidx_sb];
         }
       }
+#if CONFIG_AFFINE_REFINEMENT
+      xd->use_affine_opfl = use_affine_opfl;
+      memcpy(xd->wm_params_sb + 2 * sb_idx, wms, 2 * sizeof(wms[0]));
+#endif  // CONFIG_AFFINE_REFINEMENT
     }
   }
 
@@ -3233,8 +4140,17 @@ static void build_inter_predictors_8x8_and_bigger_refinemv(
 
       av2_opfl_rebuild_inter_predictor(
           dst, dst_stride, plane, mv_refined_sb, &inter_pred_params, xd, mi_x,
-          mi_y, build_for_decode, cm, pu_width, ref, mc_buf,
-          calc_subpel_params_func, use_4x4, mi, pu_height, mi_mv, 0);
+          mi_y, build_for_decode, cm, pu_width,
+#if CONFIG_AFFINE_REFINEMENT
+          opfl_vxy_bufs, N_OF_OFFSETS, mi->comp_refine_type,
+          use_affine_opfl ? wms : NULL, &mi->mv[ref], use_affine_opfl,
+#endif  // CONFIG_AFFINE_REFINEMENT
+          ref, mc_buf, calc_subpel_params_func, use_4x4, mi, pu_height, mi_mv, 0
+#if CONFIG_AFFINE_REFINEMENT
+          ,
+          0
+#endif  // CONFIG_AFFINE_REFINEMENT
+      );
       continue;
     }
     const MV mv_1_16th_pel = (tip_ref_frame && plane)
@@ -3264,6 +4180,14 @@ static void build_inter_predictors_8x8_and_bigger(
   const int tip_ref_frame = is_tip_ref_frame(mi->ref_frame[0]);
   const int is_compound = (!singleref_for_compound && has_second_ref(mi)) ||
                           (tip_ref_frame && tip_weight != TIP_SINGLE_WTD);
+#if CONFIG_AFFINE_REFINEMENT
+  if (tip_ref_frame) {
+    mi->comp_refine_type =
+        (cm->has_both_sides_refs && tip_weight == TIP_EQUAL_WTD)
+            ? COMP_REFINE_SUBBLK2P
+            : COMP_REFINE_NONE;
+  }
+#endif  // CONFIG_AFFINE_REFINEMENT
   const int is_intrabc = is_intrabc_block(mi, xd->tree_type);
   assert(IMPLIES(is_intrabc, !is_compound));
   struct macroblockd_plane *const pd = &xd->plane[plane];
@@ -3426,6 +4350,34 @@ static void build_inter_predictors_8x8_and_bigger(
       use_optflow_refinement,
       !is_thin_4xn_nx4_block(mi->sb_type[xd->tree_type == CHROMA_PART])));
 
+#if CONFIG_AFFINE_REFINEMENT
+  int use_affine_opfl = mi->comp_refine_type >= COMP_AFFINE_REFINE_START;
+#if CONFIG_AFFINE_REFINEMENT_SB
+  const int affine_sub_bw = AVMMIN(AFFINE_MAX_UNIT >> pd->subsampling_x, bw);
+  const int affine_sub_bh = AVMMIN(AFFINE_MAX_UNIT >> pd->subsampling_y, bh);
+  const int wm_blocks = (bw / affine_sub_bw) * (bh / affine_sub_bh);
+  // Used to store warped motion parameters for non-refinemv cases. When affine
+  // refinement is enabled, the parameters stored in this structure is used for
+  // pred data calculation. The default initialization of 'wms' is required for
+  // necessary sub-blocks as it can be utilized without population in some rare
+  // cases when av2_opfl_affine_refinement() returns one.
+  WarpedMotionParams wms[2 * NUM_AFFINE_PARAMS];
+  for (int i = 0; i < 2 * wm_blocks; i++) wms[i] = default_warp_params;
+  if (use_optflow_refinement && plane && !tip_ref_frame) {
+    use_affine_opfl = xd->use_affine_opfl;
+    memcpy(wms, xd->wm_params_sb, 2 * NUM_AFFINE_PARAMS * sizeof(wms[0]));
+  }
+#else
+  WarpedMotionParams wms[2];
+  wms[0] = default_warp_params;
+  wms[1] = default_warp_params;
+  if (use_optflow_refinement && plane) {
+    wms[0] = mi->wm_params[0];
+    wms[1] = mi->wm_params[1];
+  }
+#endif  // CONFIG_AFFINE_REFINEMENT_SB
+#endif  // CONFIG_AFFINE_REFINEMENT
+
   if (use_optflow_refinement && plane == 0) {
     // Pointers to hold optical flow MV
     // offsets.
@@ -3434,6 +4386,11 @@ static void build_inter_predictors_8x8_and_bigger(
     int *vy0 = opfl_vxy_bufs + (N_OF_OFFSETS * 2);
     int *vy1 = opfl_vxy_bufs + (N_OF_OFFSETS * 3);
 
+#if CONFIG_AFFINE_REFINEMENT
+    assert(mi->comp_refine_type > COMP_REFINE_NONE);
+    assert(IMPLIES(mi->comp_refine_type >= COMP_AFFINE_REFINE_START,
+                   is_affine_refinement_allowed(cm, xd, mi->mode)));
+#endif  // CONFIG_AFFINE_REFINEMENT
     // Allocate gradient and dst buffers
     const int n = opfl_get_subblock_size(bw, bh, plane, use_4x4);
     const int n_blocks = (bw / n) * (bh / n);
@@ -3464,9 +4421,22 @@ static void build_inter_predictors_8x8_and_bigger(
       }
       av2_get_optflow_based_mv(cm, xd, plane, mi, mv_refined, bw, bh, mi_x,
                                mi_y, build_for_decode, mc_buf,
-                               calc_subpel_params_func, gx0, gy0, gx1, gy1, vx0,
-                               vy0, vx1, vy1, dst0, dst1, bw, do_pred, use_4x4,
-                               best_mv_ref, pu_width, pu_height);
+                               calc_subpel_params_func, gx0, gy0, gx1, gy1,
+#if CONFIG_AFFINE_REFINEMENT
+                               wms, &use_affine_opfl,
+#endif  // CONFIG_AFFINE_REFINEMENT
+                               vx0, vy0, vx1, vy1, dst0, dst1, bw, do_pred,
+                               use_4x4, best_mv_ref, pu_width, pu_height);
+#if CONFIG_AFFINE_REFINEMENT
+      xd->use_affine_opfl = use_affine_opfl;
+#endif  // CONFIG_AFFINE_REFINEMENT
+#if CONFIG_AFFINE_REFINEMENT_SB
+      memcpy(xd->wm_params_sb, wms, 2 * NUM_AFFINE_PARAMS * sizeof(wms[0]));
+#elif CONFIG_AFFINE_REFINEMENT
+      // parameters derived are saved here and may be reused by chroma
+      mi->wm_params[0] = wms[0];
+      mi->wm_params[1] = wms[1];
+#endif  // CONFIG_AFFINE_REFINEMENT_SB
     }
   }
 
@@ -3517,6 +4487,14 @@ static void build_inter_predictors_8x8_and_bigger(
         ref, plane, xd->tmp_conv_dst, MAX_SB_SIZE, is_compound, xd->bd);
 
     av2_init_warp_params(&inter_pred_params, &warp_types, ref, xd, mi);
+#if CONFIG_AFFINE_REFINEMENT
+    assert(IMPLIES(av2_is_scaled(sf),
+                   mi->comp_refine_type < COMP_AFFINE_REFINE_START));
+    if (use_optflow_refinement &&
+        mi->comp_refine_type >= COMP_AFFINE_REFINE_START &&
+        (opfl_sub_bw < 8 || opfl_sub_bh < 8))
+      *ext_warp_used = true;
+#endif  // CONFIG_AFFINE_REFINEMENT
     assert(IMPLIES(inter_pred_params.mode == WARP_PRED &&
                        av2_is_scaled(inter_pred_params.scale_factors),
                    !inter_pred_params.warp_params.use_affine_filter));
@@ -3598,8 +4576,17 @@ static void build_inter_predictors_8x8_and_bigger(
                                                        opfl_sub_bh);
       av2_opfl_rebuild_inter_predictor(
           dst, dst_stride, plane, mv_refined, &inter_pred_params, xd, mi_x,
-          mi_y, build_for_decode, cm, pu_width, ref, mc_buf,
-          calc_subpel_params_func, use_4x4, mi, pu_height, mi_mv, 1);
+          mi_y, build_for_decode, cm, pu_width,
+#if CONFIG_AFFINE_REFINEMENT
+          opfl_vxy_bufs, N_OF_OFFSETS, mi->comp_refine_type, wms, &mi->mv[ref],
+          use_affine_opfl,
+#endif  // CONFIG_AFFINE_REFINEMENT
+          ref, mc_buf, calc_subpel_params_func, use_4x4, mi, pu_height, mi_mv, 1
+#if CONFIG_AFFINE_REFINEMENT
+          ,
+          *ext_warp_used
+#endif  // CONFIG_AFFINE_REFINEMENT
+      );
       continue;
     }
     if (mi->bawp_flag[0] > 0 && (plane == 0 || mi->bawp_flag[1])) {

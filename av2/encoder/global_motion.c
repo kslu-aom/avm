@@ -167,7 +167,12 @@ static int64_t highbd_warp_error(WarpedMotionParams *wm,
       const int warp_h = AVMMIN(error_bsize_h, p_row + ref_height - i);
       av2_highbd_warp_plane(wm, ref, ref_width, ref_height, ref_stride, tmp, j,
                             i, warp_w, warp_h, WARP_ERROR_BLOCK, subsampling_x,
-                            subsampling_y, bd, &conv_params, NULL, 0, NULL);
+                            subsampling_y, bd, &conv_params, NULL, 0, NULL
+#if CONFIG_AFFINE_REFINEMENT
+                            ,
+                            0, NULL, 0, NULL
+#endif  // CONFIG_AFFINE_REFINEMENT
+      );
 
       if (warp_w == WARP_ERROR_BLOCK && warp_h == WARP_ERROR_BLOCK) {
         gm_sumerr += avm_highbd_sad32x32(tmp, WARP_ERROR_BLOCK,

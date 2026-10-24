@@ -346,11 +346,24 @@ void av2_highbd_warp_affine_avx2(const int32_t *mat, const uint16_t *ref,
                                  int p_width, int p_height, int p_stride,
                                  int subsampling_x, int subsampling_y, int bd,
                                  ConvolveParams *conv_params, int16_t alpha,
-                                 int16_t beta, int16_t gamma, int16_t delta) {
-  const int left_limit = 0;
-  const int right_limit = width - 1;
-  const int top_limit = 0;
-  const int bottom_limit = height - 1;
+                                 int16_t beta, int16_t gamma, int16_t delta
+#if CONFIG_AFFINE_REFINEMENT
+                                 ,
+                                 int use_damr_padding, PadBlock *ref_area
+#endif  // CONFIG_AFFINE_REFINEMENT
+) {
+  int left_limit = 0;
+  int right_limit = width - 1;
+  int top_limit = 0;
+  int bottom_limit = height - 1;
+#if CONFIG_AFFINE_REFINEMENT
+  if (use_damr_padding) {
+    left_limit = ref_area->x0;
+    right_limit = ref_area->x1 - 1;
+    top_limit = ref_area->y0;
+    bottom_limit = ref_area->y1 - 1;
+  }
+#endif  // CONFIG_AFFINE_REFINEMENT
   __m256i tmp[15];
   const int reduce_bits_horiz = conv_params->round_0;
   const int reduce_bits_vert = conv_params->is_compound

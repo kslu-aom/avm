@@ -205,7 +205,11 @@ void av2_enc_build_inter_predictor(const AV2_COMMON *cm, MACROBLOCKD *xd,
                              is_refinemv_supported;
   assert(IMPLIES(need_chroma_refinemv, !is_interintra_pred(mbmi)));
 
+#if CONFIG_AFFINE_REFINEMENT
+  if (need_chroma_refinemv && default_refinemv_modes(cm, mbmi))
+#else
   if (need_chroma_refinemv && default_refinemv_modes(mbmi))
+#endif  // CONFIG_AFFINE_REFINEMENT
     need_chroma_refinemv &= (mbmi->comp_group_idx == 0 &&
                              mbmi->interinter_comp.type == COMPOUND_AVERAGE);
   // Set the prediction buffer as reference frames of TIP_FRAME

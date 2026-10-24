@@ -16,6 +16,9 @@
 using libavm_test::ACMRandom;
 using libavm_test::AV2ExtHighbdWarpFilter::AV2ExtHighbdWarpFilterTest;
 using libavm_test::AV2HighbdWarpFilter::AV2HighbdWarpFilterTest;
+#if CONFIG_AFFINE_REFINEMENT
+using libavm_test::AV2HighbdWarpBilinearFilter::AV2HighbdWarpBilinearFilterTest;
+#endif  // CONFIG_AFFINE_REFINEMENT
 using std::make_tuple;
 using std::tuple;
 
@@ -56,3 +59,21 @@ INSTANTIATE_TEST_SUITE_P(
 GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(AV2HighbdWarpFilterTest);
 
 }  // namespace
+
+#if CONFIG_AFFINE_REFINEMENT
+TEST_P(AV2HighbdWarpBilinearFilterTest, DISABLED_Speed) {
+  RunSpeedTest(std::get<4>(GET_PARAM(0)));
+}
+
+TEST_P(AV2HighbdWarpBilinearFilterTest, CheckOutput) {
+  RunCheckOutput(std::get<4>(GET_PARAM(0)));
+}
+TEST_P(AV2HighbdWarpBilinearFilterTest, ExtremeValues) {
+  RunTest_ExtremeValues(std::get<4>(GET_PARAM(0)));
+}
+#if HAVE_AVX2
+INSTANTIATE_TEST_SUITE_P(AVX2, AV2HighbdWarpBilinearFilterTest,
+                         libavm_test::AV2HighbdWarpBilinearFilter::BuildParams(
+                             av2_warp_plane_bilinear_avx2));
+#endif  // HAVE_AVX2
+#endif  // CONFIG_AFFINE_REFINEMENT

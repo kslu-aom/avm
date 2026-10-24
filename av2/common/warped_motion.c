@@ -715,11 +715,24 @@ void av2_highbd_warp_affine_c(const int32_t *mat, const uint16_t *ref,
                               int p_stride, int subsampling_x,
                               int subsampling_y, int bd,
                               ConvolveParams *conv_params, int16_t alpha,
-                              int16_t beta, int16_t gamma, int16_t delta) {
-  const int left_limit = 0;
-  const int right_limit = width - 1;
-  const int top_limit = 0;
-  const int bottom_limit = height - 1;
+                              int16_t beta, int16_t gamma, int16_t delta
+#if CONFIG_AFFINE_REFINEMENT
+                              ,
+                              int use_damr_padding, PadBlock *ref_area
+#endif  // CONFIG_AFFINE_REFINEMENT
+) {
+  int left_limit = 0;
+  int right_limit = width - 1;
+  int top_limit = 0;
+  int bottom_limit = height - 1;
+#if CONFIG_AFFINE_REFINEMENT
+  if (use_damr_padding) {
+    left_limit = ref_area->x0;
+    right_limit = ref_area->x1 - 1;
+    top_limit = ref_area->y0;
+    bottom_limit = ref_area->y1 - 1;
+  }
+#endif  // CONFIG_AFFINE_REFINEMENT
   int32_t tmp[15 * 8];
   const int reduce_bits_horiz = conv_params->round_0;
   const int reduce_bits_vert = conv_params->is_compound
@@ -869,7 +882,13 @@ void av2_ext_highbd_warp_affine_c(const int32_t *mat, const uint16_t *ref,
                                   int p_width, int p_height, int p_stride,
                                   int subsampling_x, int subsampling_y, int bd,
                                   ConvolveParams *conv_params,
-                                  int use_warp_bd_box, PadBlock *warp_bd_box) {
+                                  int use_warp_bd_box, PadBlock *warp_bd_box
+#if CONFIG_AFFINE_REFINEMENT
+                                  ,
+                                  int use_warp_bd_damr,
+                                  PadBlock *warp_bd_box_damr
+#endif  // CONFIG_AFFINE_REFINEMENT
+) {
   int32_t im_block[(4 + EXT_WARP_TAPS - 1) * 4];
   const int reduce_bits_horiz = conv_params->round_0;
   const int reduce_bits_vert = conv_params->is_compound
@@ -897,6 +916,15 @@ void av2_ext_highbd_warp_affine_c(const int32_t *mat, const uint16_t *ref,
   int bottom_limit = height - 1;
   int warp_bd_box_mem_stride = MAX_WARP_BD_SIZE;
   int box_idx, x_loc, y_loc;
+
+#if CONFIG_AFFINE_REFINEMENT
+  if (use_warp_bd_damr) {
+    left_limit = warp_bd_box_damr->x0;
+    right_limit = warp_bd_box_damr->x1 - 1;
+    top_limit = warp_bd_box_damr->y0;
+    bottom_limit = warp_bd_box_damr->y1 - 1;
+  }
+#endif  // CONFIG_AFFINE_REFINEMENT
 
   for (int i = p_row; i < p_row + p_height; i += 4) {
     for (int j = p_col; j < p_col + p_width; j += 4) {
@@ -1004,7 +1032,12 @@ void av2_ext_highbd_warp_affine_scaled_c(
     uint16_t *pred, int p_col, int p_row, int p_width, int p_height,
     int p_stride, int subsampling_x, int subsampling_y, int bd,
     ConvolveParams *conv_params, const struct scale_factors *sf,
-    int use_warp_bd_box, PadBlock *warp_bd_box) {
+    int use_warp_bd_box, PadBlock *warp_bd_box
+#if CONFIG_AFFINE_REFINEMENT
+    ,
+    int use_warp_bd_damr, PadBlock *warp_bd_box_damr
+#endif  // CONFIG_AFFINE_REFINEMENT
+) {
   //  int32_t im_block[(4 + EXT_WARP_TAPS - 1) * 4];
   int32_t im_block[(2 * 4 + EXT_WARP_TAPS) * 4];
   const int reduce_bits_horiz = conv_params->round_0;
@@ -1048,6 +1081,14 @@ void av2_ext_highbd_warp_affine_scaled_c(
         top_limit = warp_bd_box[box_idx].y0;
         bottom_limit = warp_bd_box[box_idx].y1 - 1;
       }
+#if CONFIG_AFFINE_REFINEMENT
+      if (use_warp_bd_damr) {
+        left_limit = warp_bd_box_damr->x0;
+        right_limit = warp_bd_box_damr->x1 - 1;
+        top_limit = warp_bd_box_damr->y0;
+        bottom_limit = warp_bd_box_damr->y1 - 1;
+      }
+#endif  // CONFIG_AFFINE_REFINEMENT
       // Calculate the center of this 4x4 block,
       // project to luma coordinates (if in a subsampled chroma plane),
       // apply the affine transformation,
@@ -1177,8 +1218,16 @@ void av2_highbd_warp_plane(WarpedMotionParams *wm, const uint16_t *const ref,
                            int p_width, int p_height, int p_stride,
                            int subsampling_x, int subsampling_y, int bd,
                            ConvolveParams *conv_params,
-                           const struct scale_factors *sf, int use_warp_bd_box,
-                           PadBlock *warp_bd_box) {
+                           const struct scale_factors *sf,
+#if CONFIG_AFFINE_REFINEMENT
+                           int use_damr_padding, ReferenceArea *ref_area,
+#endif  // CONFIG_AFFINE_REFINEMENT
+                           int use_warp_bd_box, PadBlock *warp_bd_box
+#if CONFIG_AFFINE_REFINEMENT
+                           ,
+                           int use_warp_bd_damr, PadBlock *warp_bd_box_damr
+#endif  // CONFIG_AFFINE_REFINEMENT
+) {
   const int is_scaled = sf ? av2_is_scaled(sf) : 0;
   assert(wm->wmtype <= AFFINE);
   if (wm->wmtype == ROTZOOM) {
@@ -1202,18 +1251,34 @@ void av2_highbd_warp_plane(WarpedMotionParams *wm, const uint16_t *const ref,
       av2_ext_highbd_warp_affine_scaled_c(
           &wm_scaled.wmmat[0], ref, width, height, stride, pred, p_col, p_row,
           p_width, p_height, p_stride, subsampling_x, subsampling_y, bd,
-          conv_params, sf, use_warp_bd_box, warp_bd_box);
+          conv_params, sf, use_warp_bd_box, warp_bd_box
+#if CONFIG_AFFINE_REFINEMENT
+          ,
+          use_warp_bd_damr, warp_bd_box_damr
+#endif  // CONFIG_AFFINE_REFINEMENT
+      );
     } else {
       av2_ext_highbd_warp_affine(&wm_scaled.wmmat[0], ref, width, height,
                                  stride, pred, p_col, p_row, p_width, p_height,
                                  p_stride, subsampling_x, subsampling_y, bd,
-                                 conv_params, use_warp_bd_box, warp_bd_box);
+                                 conv_params, use_warp_bd_box, warp_bd_box
+#if CONFIG_AFFINE_REFINEMENT
+                                 ,
+                                 use_warp_bd_damr, warp_bd_box_damr
+#endif  // CONFIG_AFFINE_REFINEMENT
+      );
     }
   } else {
     av2_highbd_warp_affine(mat, ref, width, height, stride, pred, p_col, p_row,
                            p_width, p_height, p_stride, subsampling_x,
                            subsampling_y, bd, conv_params, alpha, beta, gamma,
-                           delta);
+                           delta
+#if CONFIG_AFFINE_REFINEMENT
+                           ,
+                           use_damr_padding,
+                           ref_area ? &ref_area->pad_block : NULL
+#endif  // CONFIG_AFFINE_REFINEMENT
+    );
   }
 }
 
@@ -1222,11 +1287,27 @@ void av2_warp_plane(WarpedMotionParams *wm, int bd, const uint16_t *ref,
                     int p_col, int p_row, int p_width, int p_height,
                     int p_stride, int subsampling_x, int subsampling_y,
                     ConvolveParams *conv_params, const struct scale_factors *sf,
-                    int use_warp_bd_box, PadBlock *warp_bd_box) {
+#if CONFIG_AFFINE_REFINEMENT
+                    int use_damr_padding, ReferenceArea *ref_area,
+#endif  // CONFIG_AFFINE_REFINEMENT
+                    int use_warp_bd_box, PadBlock *warp_bd_box
+#if CONFIG_AFFINE_REFINEMENT
+                    ,
+                    int use_warp_bd_damr, PadBlock *warp_bd_box_damr
+#endif  // CONFIG_AFFINE_REFINEMENT
+) {
   av2_highbd_warp_plane(wm, ref, width, height, stride, pred, p_col, p_row,
                         p_width, p_height, p_stride, subsampling_x,
-                        subsampling_y, bd, conv_params, sf, use_warp_bd_box,
-                        warp_bd_box);
+                        subsampling_y, bd, conv_params, sf,
+#if CONFIG_AFFINE_REFINEMENT
+                        use_damr_padding, ref_area,
+#endif  // CONFIG_AFFINE_REFINEMENT
+                        use_warp_bd_box, warp_bd_box
+#if CONFIG_AFFINE_REFINEMENT
+                        ,
+                        use_warp_bd_damr, warp_bd_box_damr
+#endif  // CONFIG_AFFINE_REFINEMENT
+  );
 }
 
 #define LS_MV_MAX 256  // max mv in 1/8-pel

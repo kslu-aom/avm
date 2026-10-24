@@ -209,6 +209,10 @@ struct av2_extracfg {
   int enable_angle_delta;
   avm_opfl_refine_type enable_opfl_refine;  // optical flow refinement type
                                             // for sequence
+#if CONFIG_AFFINE_REFINEMENT
+  avm_opfl_refine_type enable_affine_refine;  // enable affine refinement
+                                              // for sequence
+#endif                                        // CONFIG_AFFINE_REFINEMENT
 #if CONFIG_DENOISE
   float noise_level;
   int noise_block_size;
@@ -545,6 +549,9 @@ static struct av2_extracfg default_extra_cfg = {
   1,    // enable search range extension for intrabc
   1,    // enable angle delta
   1,    // enable optical flow refinement
+#if CONFIG_AFFINE_REFINEMENT
+  1,    // enable affine refinement
+#endif  // CONFIG_AFFINE_REFINEMENT
 #if CONFIG_DENOISE
   0,   // noise_level
   32,  // noise_block_size
@@ -960,6 +967,9 @@ static void update_encoder_config(cfg_options_t *cfg,
   cfg->enable_warped_motion = extra_cfg->enable_warped_motion;
   cfg->enable_diff_wtd_comp = extra_cfg->enable_diff_wtd_comp;
   cfg->enable_opfl_refine = extra_cfg->enable_opfl_refine;
+#if CONFIG_AFFINE_REFINEMENT
+  cfg->enable_affine_refine = extra_cfg->enable_affine_refine;
+#endif  // CONFIG_AFFINE_REFINEMENT
   cfg->enable_angle_delta = extra_cfg->enable_angle_delta;
   cfg->disable_ml_partition_speed_features =
       extra_cfg->disable_ml_partition_speed_features;
@@ -1085,6 +1095,9 @@ static void update_default_encoder_config(const cfg_options_t *cfg,
   extra_cfg->enable_warped_motion = cfg->enable_warped_motion;
   extra_cfg->enable_diff_wtd_comp = cfg->enable_diff_wtd_comp;
   extra_cfg->enable_opfl_refine = cfg->enable_opfl_refine;
+#if CONFIG_AFFINE_REFINEMENT
+  extra_cfg->enable_affine_refine = cfg->enable_affine_refine;
+#endif  // CONFIG_AFFINE_REFINEMENT
   extra_cfg->enable_angle_delta = cfg->enable_angle_delta;
   extra_cfg->enable_rect_partitions = cfg->enable_rect_partitions;
   extra_cfg->enable_uneven_4way_partitions = cfg->enable_uneven_4way_partitions;
@@ -1490,6 +1503,12 @@ static avm_codec_err_t set_encoder_config(AV2EncoderConfig *oxcf,
       tool_cfg->enable_opfl_refine = 0;
     }
   }
+#if CONFIG_AFFINE_REFINEMENT
+  tool_cfg->enable_affine_refine = extra_cfg->enable_affine_refine;
+  if (!tool_cfg->enable_opfl_refine) {
+    tool_cfg->enable_affine_refine = 0;
+  }
+#endif  // CONFIG_AFFINE_REFINEMENT
   tool_cfg->enable_tip_refinemv =
       (tool_cfg->enable_tip &&
        (tool_cfg->enable_opfl_refine || tool_cfg->enable_refinemv))
@@ -4541,6 +4560,12 @@ static avm_codec_err_t encoder_set_option(avm_codec_alg_priv_t *ctx,
                                   &g_av2_codec_arg_defs.enable_opfl_refine,
                                   argv, err_string)) {
     extra_cfg.enable_opfl_refine = avm_arg_parse_int_helper(&arg, err_string);
+#if CONFIG_AFFINE_REFINEMENT
+  } else if (avm_arg_match_helper(&arg,
+                                  &g_av2_codec_arg_defs.enable_affine_refine,
+                                  argv, err_string)) {
+    extra_cfg.enable_affine_refine = avm_arg_parse_int_helper(&arg, err_string);
+#endif  // CONFIG_AFFINE_REFINEMENT
   } else if (avm_arg_match_helper(&arg,
                                   &g_av2_codec_arg_defs.reduced_tx_type_set,
                                   argv, err_string)) {
@@ -4976,6 +5001,9 @@ static const avm_codec_enc_cfg_t encoder_usage_cfg[] = {
           0,    0,  1,   1,
           1,    1,  1,   1,
           1,    1,  1,
+#if CONFIG_AFFINE_REFINEMENT
+          1,
+#endif  // CONFIG_AFFINE_REFINEMENT
           0,  // reduced_tx_part_set
           1,    1,  1,   1,
           3,    1,
@@ -5115,6 +5143,9 @@ static const avm_codec_enc_cfg_t encoder_usage_cfg[] = {
           0,    0,  1,   1,
           1,    1,  1,   1,
           1,    1,  1,
+#if CONFIG_AFFINE_REFINEMENT
+          1,
+#endif  // CONFIG_AFFINE_REFINEMENT
           0,  // reduced_tx_part_set
           1,    1,  1,   1,
           3,    1,
