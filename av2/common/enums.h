@@ -930,7 +930,9 @@ enum {
 #if CONFIG_AFFINE_REFINEMENT
 #if CONFIG_AFFINE_REFINEMENT_SB
 // Max affine refinement unit size
+#ifndef AFFINE_MAX_UNIT_LOG2
 #define AFFINE_MAX_UNIT_LOG2 5  // per 32x32 subblock
+#endif
 #define AFFINE_MAX_UNIT (1 << AFFINE_MAX_UNIT_LOG2)
 #endif  // CONFIG_AFFINE_REFINEMENT_SB
 
@@ -956,11 +958,10 @@ enum {
 } UENUM1BYTE(CompoundRefineType);
 #endif  // CONFIG_AFFINE_REFINEMENT
 
-#if CONFIG_AFFINE_REFINEMENT_SB
-#define OPFL_GRAD_UNIT_LOG2 AFFINE_MAX_UNIT_LOG2
-#else
+// Gradient computation unit for the translational optical flow refinement
+// (unchanged by CONFIG_AFFINE_REFINEMENT; the affine refinement computes its
+// gradients per AFFINE_MAX_UNIT instead).
 #define OPFL_GRAD_UNIT_LOG2 4
-#endif  // CONFIG_AFFINE_REFINEMENT_SB
 #define OPFL_GRAD_UNIT (1 << OPFL_GRAD_UNIT_LOG2)
 
 enum {
