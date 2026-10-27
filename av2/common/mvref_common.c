@@ -179,9 +179,15 @@ void av2_copy_frame_refined_mvs_tip_frame_mode(const AV2_COMMON *const cm,
       is_optflow_refinement_enabled(cm, xd, mi, AVM_PLANE_Y, tip_ref_frame);
   int n = opfl_get_subblock_size(bw, bh, AVM_PLANE_Y, use_4x4);
 #if CONFIG_AFFINE_REFINEMENT && CONFIG_AFFINE_REFINEMENT_SB
+  // Affine models are stored per AFFINE_MAX_UNIT, or per refinemv sub-block
+  // when DAMR is applied on top of the SMVR search.
+  const int damr_unit =
+      (mi->refinemv_flag && is_damr_allowed_with_refinemv(mi->mode))
+          ? REFINEMV_SUBBLOCK_WIDTH
+          : AFFINE_MAX_UNIT;
   int sb_idx = 0;
-  int sub_bw = AVMMIN(AFFINE_MAX_UNIT, bw);
-  int sub_bh = AVMMIN(AFFINE_MAX_UNIT, bh);
+  int sub_bw = AVMMIN(damr_unit, bw);
+  int sub_bh = AVMMIN(damr_unit, bh);
   int wms_stride = bw / sub_bw;
 #endif  // CONFIG_AFFINE_REFINEMENT && CONFIG_AFFINE_REFINEMENT_SB
 
@@ -428,9 +434,15 @@ void av2_copy_frame_refined_mvs(const AV2_COMMON *const cm,
   int n = opfl_get_subblock_size(bw, bh, AVM_PLANE_Y, 1);
   int w, h;
 #if CONFIG_AFFINE_REFINEMENT && CONFIG_AFFINE_REFINEMENT_SB
+  // Affine models are stored per AFFINE_MAX_UNIT, or per refinemv sub-block
+  // when DAMR is applied on top of the SMVR search.
+  const int damr_unit =
+      (mi->refinemv_flag && is_damr_allowed_with_refinemv(mi->mode))
+          ? REFINEMV_SUBBLOCK_WIDTH
+          : AFFINE_MAX_UNIT;
   int sb_idx = 0;
-  int sub_bw = AVMMIN(AFFINE_MAX_UNIT, bw);
-  int sub_bh = AVMMIN(AFFINE_MAX_UNIT, bh);
+  int sub_bw = AVMMIN(damr_unit, bw);
+  int sub_bh = AVMMIN(damr_unit, bh);
   int wms_stride = bw / sub_bw;
 #endif  // CONFIG_AFFINE_REFINEMENT && CONFIG_AFFINE_REFINEMENT_SB
 
