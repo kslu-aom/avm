@@ -809,10 +809,29 @@ static INLINE int is_refinemv_allowed_bsize(BLOCK_SIZE bsize) {
 }
 
 #if CONFIG_AFFINE_REFINEMENT
+// Experiment: allow DAMR on top of the SMVR (refinemv) sub-block search for
+// NEAR_NEARMV_OPTFLOW (affine models are then derived per 16x16 refinemv
+// unit).
+#ifndef DAMR_EXP_REFINEMV
+#define DAMR_EXP_REFINEMV 0
+#endif
+// Experiment: fix the sign of the translation term for past references
+// (d > 0) so that t' = -d * (A^-1 * t) is used, matching the model
+// derivation.
+// Experiment: 6-parameter affine model for affine units >= DAMR_6P_MIN.
+#ifndef DAMR_EXP_6P
+#define DAMR_EXP_6P 0
+#endif
+#ifndef DAMR_EXP_TXFIX
+#define DAMR_EXP_TXFIX 0
+#endif
 static INLINE int is_damr_allowed_with_refinemv(const PREDICTION_MODE mode) {
-  // if (mode == NEAR_NEARMV_OPTFLOW) return 1;
+#if DAMR_EXP_REFINEMV
+  return mode == NEAR_NEARMV_OPTFLOW;
+#else
   (void)mode;
   return 0;
+#endif  // DAMR_EXP_REFINEMV
 }
 #endif  // CONFIG_AFFINE_REFINEMENT
 

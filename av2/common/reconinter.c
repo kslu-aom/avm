@@ -916,7 +916,7 @@ void av2_warp_plane_bilinear_c(WarpedMotionParams *wm, int bd,
   }
 }
 
-#define MAX_LS_DIM 4
+#define MAX_LS_DIM 6
 // Swap two rows for Gaussian elimination routine
 void swap_rows(int64_t *mat, int64_t *sol, const int i, const int j,
                const int dim) {
@@ -1087,6 +1087,34 @@ int solver_4d(const int32_t *mat_a, const int32_t *vec_b, int *precbits,
   int ret = gaussian_elimination(mat, vec, precbits, 4);
   for (int i = 0; i < 4; i++) sol[i] = (int)vec[i];
   return ret;
+}
+#endif  // CONFIG_AFFINE_REFINEMENT
+
+#if CONFIG_AFFINE_REFINEMENT
+// Exploration knobs for DAMR coding-gain studies (encoder and decoder read
+// the same environment variable, so streams stay decodable within one run).
+//   bit 0: gate affine refinement on SAD(P0,P1) >= bw*bh (legacy F107 rule)
+//   bit 1: fall back to translational refinement when the affine model does
+//          not reduce the inter-reference error of the block
+//   bit 2: fall back per 32x32 affine unit instead of per block (needs bit 1)
+#define DAMR_EXP_SAD_GATE 1
+#define DAMR_EXP_POST_CHECK 2
+#define DAMR_EXP_POST_CHECK_SB 4
+static int damr_exp_flags(void) {
+  static int flags = -1;
+  if (flags < 0) {
+    const char *env = getenv("DAMR_EXP");
+    flags = env ? atoi(env) : 0;
+  }
+  return flags;
+}
+
+static int64_t damr_pdiff_sad(const int16_t *pdiff, int stride, int bw,
+                              int bh) {
+  int64_t sad = 0;
+  for (int i = 0; i < bh; i++)
+    for (int j = 0; j < bw; j++) sad += abs(pdiff[i * stride + j]);
+  return sad;
 }
 #endif  // CONFIG_AFFINE_REFINEMENT
 
@@ -1359,8 +1387,13 @@ void get_ref_affine_params(int bw, int bh, int mi_x, int mi_y,
         -scale_x * sin_angle, WARPEDMODEL_PREC_BITS));
     wm->wmmat[4] = clamp64_to_32(ROUND_POWER_OF_TWO_SIGNED_64(
         scale_y * sin_angle, WARPEDMODEL_PREC_BITS));
+#if DAMR_EXP_TXFIX
+    int64_t tmp_tx = (int64_t)wm->wmmat[2] * (int64_t)am_params->tran_x +
+                     (int64_t)wm->wmmat[3] * (int64_t)am_params->tran_y;
+#else
     int64_t tmp_tx = (int64_t)wm->wmmat[2] * (int64_t)am_params->tran_x -
                      (int64_t)wm->wmmat[3] * (int64_t)am_params->tran_y;
+#endif  // DAMR_EXP_TXFIX
     int64_t tmp_ty = (int64_t)wm->wmmat[4] * (int64_t)am_params->tran_x +
                      (int64_t)wm->wmmat[5] * (int64_t)am_params->tran_y;
     wm->wmmat[0] = (int32_t)clamp64(
@@ -1492,6 +1525,144 @@ void av2_calc_affine_autocorrelation_matrix_c(const int16_t *pdiff, int pstride,
   mat_a[10] += rls_alpha;
   mat_a[15] += rls_alpha;
 }
+
+#if DAMR_EXP_6P
+// Experiment: full 6-parameter affine model v = J x + t, with
+// J = [a b; c e], solved per affine unit of size >= DAMR_6P_MIN.
+#ifndef DAMR_6P_MIN
+#define DAMR_6P_MIN 32
+#endif
+typedef struct {
+  int j[4];  // a, b, c, e (WARPEDMODEL_PREC_BITS)
+  int tran_x, tran_y;
+} Affine6Params;
+
+static void calc_affine6_autocorrelation(const int16_t *pdiff, int pstride,
+                                         const int16_t *gx, const int16_t *gy,
+                                         int gstride, int bw, int bh,
+                                         int32_t *mat_a, int32_t *vec_b) {
+  int x_range_log2 = get_msb(bw);
+  int y_range_log2 = get_msb(bh);
+  int step_h = AVMMAX(1, bh >> AFFINE_AVG_MAX_SIZE_LOG2);
+  int step_w = AVMMAX(1, bw >> AFFINE_AVG_MAX_SIZE_LOG2);
+  int npel_log2 = AVMMIN(AFFINE_AVG_MAX_SIZE_LOG2, x_range_log2) +
+                  AVMMIN(AFFINE_AVG_MAX_SIZE_LOG2, y_range_log2);
+  int32_t max_el =
+      find_max_matrix_element(pdiff, pstride, gx, gy, gstride, bw, bh);
+  int max_el_msb = max_el > 0 ? get_msb(max_el) : 0;
+  int grad_bits =
+      AVMMAX(0, max_el_msb * 2 + npel_log2 +
+                    AVMMAX(x_range_log2, y_range_log2) - AFFINE_GRAD_BITS_THR);
+  const int coords_bits = AVMMAX(
+      0, ((x_range_log2 + y_range_log2) >> 1) - AFFINE_COORDS_OFFSET_BITS);
+  for (int i = 0; i < bh; ++i) {
+    for (int j = 0; j < bw; ++j) {
+      if (AVMMAX(i, j) >= AFFINE_AVG_MAX_SIZE) continue;
+      const int x = step_w * j - bw / 2 + 1;
+      const int y = step_h * i - bh / 2 + 1;
+      int gidx = i * gstride + j;
+      int a[6];
+      a[0] = ROUND_POWER_OF_TWO_SIGNED(gx[gidx] * x, coords_bits);
+      a[1] = ROUND_POWER_OF_TWO_SIGNED(gx[gidx] * y, coords_bits);
+      a[2] = ROUND_POWER_OF_TWO_SIGNED(gy[gidx] * x, coords_bits);
+      a[3] = ROUND_POWER_OF_TWO_SIGNED(gy[gidx] * y, coords_bits);
+      a[4] = gx[gidx];
+      a[5] = gy[gidx];
+      for (int s = 0; s < 6; ++s)
+        a[s] = clamp(a[s], -AFFINE_SAMP_CLAMP_VAL, AFFINE_SAMP_CLAMP_VAL);
+      const int d = clamp(pdiff[i * pstride + j], -AFFINE_SAMP_CLAMP_VAL,
+                          AFFINE_SAMP_CLAMP_VAL);
+      for (int s = 0; s < 6; ++s) {
+        for (int t = 0; t <= s; ++t)
+          mat_a[s * 6 + t] += ROUND_POWER_OF_TWO_SIGNED(a[s] * a[t], grad_bits);
+        vec_b[s] += ROUND_POWER_OF_TWO_SIGNED(a[s] * d, grad_bits);
+      }
+    }
+  }
+  for (int s = 0; s < 6; ++s)
+    for (int t = s + 1; t < 6; ++t) mat_a[s * 6 + t] = mat_a[t * 6 + s];
+  const int rls_alpha = (bw * bh >> 4) * AFFINE_RLS_PARAM;
+  for (int s = 0; s < 6; ++s) mat_a[s * 6 + s] += rls_alpha;
+}
+
+static int opfl_affine6_refinement(const int16_t *pdiff, int pstride,
+                                   const int16_t *gx, const int16_t *gy,
+                                   int gstride, int bw, int bh,
+                                   int grad_prec_bits, Affine6Params *p6) {
+  int32_t mat_a[36] = { 0 };
+  int32_t vec_b[6] = { 0 };
+  int64_t mat[36], vec[6];
+  calc_affine6_autocorrelation(pdiff, pstride, gx, gy, gstride, bw, bh, mat_a,
+                               vec_b);
+  const int coords_bits =
+      AVMMAX(0, ((get_msb(bw) + get_msb(bh)) >> 1) - AFFINE_COORDS_OFFSET_BITS);
+  int prec_bits[6];
+  for (int s = 0; s < 6; ++s)
+    prec_bits[s] =
+        grad_prec_bits + AFFINE_PREC_BITS - (s < 4 ? coords_bits : 0);
+  for (int i = 0; i < 36; i++) mat[i] = mat_a[i];
+  for (int i = 0; i < 6; i++) vec[i] = vec_b[i];
+  if (!gaussian_elimination(mat, vec, prec_bits, 6)) return 1;
+  const int up = 1 << (WARPEDMODEL_PREC_BITS - AFFINE_PREC_BITS);
+  for (int s = 0; s < 4; ++s)
+    p6->j[s] = (int)clamp64((int64_t)vec[s] * up, INT32_MIN, INT32_MAX);
+  p6->tran_x = (int)clamp64((int64_t)vec[4] * up, INT32_MIN, INT32_MAX);
+  p6->tran_y = (int)clamp64((int64_t)vec[5] * up, INT32_MIN, INT32_MAX);
+  return 0;
+}
+
+// First-order mapping of the 6-parameter model to the per-reference warp:
+// x_ref = (I - d*J) x - d*t (for d > 0 the inverse is approximated by I - dJ
+// and the translation is rotated by the inverse matrix, as for the 4p model).
+static void get_ref_affine6_params(int bw, int bh, int mi_x, int mi_y,
+                                   const Affine6Params *p6,
+                                   WarpedMotionParams *wm, const int d,
+                                   const MV *const mv,
+                                   const struct scale_factors *sf) {
+  wm->invalid = 1;
+  const int64_t unit_offset = 1 << WARPEDMODEL_PREC_BITS;
+  wm->wmmat[2] = clamp64_to_32(unit_offset - (int64_t)d * p6->j[0]);
+  wm->wmmat[3] = clamp64_to_32(-(int64_t)d * p6->j[1]);
+  wm->wmmat[4] = clamp64_to_32(-(int64_t)d * p6->j[2]);
+  wm->wmmat[5] = clamp64_to_32(unit_offset - (int64_t)d * p6->j[3]);
+  int64_t tx = p6->tran_x, ty = p6->tran_y;
+  if (d > 0) {
+    int64_t tmp_tx = (int64_t)wm->wmmat[2] * tx + (int64_t)wm->wmmat[3] * ty;
+    int64_t tmp_ty = (int64_t)wm->wmmat[4] * tx + (int64_t)wm->wmmat[5] * ty;
+    tx = ROUND_POWER_OF_TWO_SIGNED_64(tmp_tx, WARPEDMODEL_PREC_BITS);
+    ty = ROUND_POWER_OF_TWO_SIGNED_64(tmp_ty, WARPEDMODEL_PREC_BITS);
+  }
+  wm->wmmat[0] = (int32_t)clamp64(
+      tx * (-d), -WARPEDMODEL_TRANS_CLAMP,
+      WARPEDMODEL_TRANS_CLAMP - (1 << WARP_PARAM_REDUCE_BITS));
+  wm->wmmat[1] = (int32_t)clamp64(
+      ty * (-d), -WARPEDMODEL_TRANS_CLAMP,
+      WARPEDMODEL_TRANS_CLAMP - (1 << WARP_PARAM_REDUCE_BITS));
+  wm->wmmat[6] = wm->wmmat[7] = 0;
+
+  av2_reduce_warp_model(wm);
+  av2_get_shear_params(wm, sf);
+
+  const int center_x = mi_x + bw / 2 - 1;
+  const int center_y = mi_y + bh / 2 - 1;
+  int64_t wmmat0 = (int64_t)wm->wmmat[0] +
+                   (int64_t)mv->col * (1 << (WARPEDMODEL_PREC_BITS - 3)) -
+                   ((int64_t)center_x * (wm->wmmat[2] - unit_offset) +
+                    (int64_t)center_y * wm->wmmat[3]);
+  int64_t wmmat1 = (int64_t)wm->wmmat[1] +
+                   (int64_t)mv->row * (1 << (WARPEDMODEL_PREC_BITS - 3)) -
+                   ((int64_t)center_x * wm->wmmat[4] +
+                    (int64_t)center_y * (wm->wmmat[5] - unit_offset));
+  wm->wmmat[0] =
+      (int32_t)clamp64(wmmat0, -WARPEDMODEL_TRANS_CLAMP,
+                       WARPEDMODEL_TRANS_CLAMP - (1 << WARP_PARAM_REDUCE_BITS));
+  wm->wmmat[1] =
+      (int32_t)clamp64(wmmat1, -WARPEDMODEL_TRANS_CLAMP,
+                       WARPEDMODEL_TRANS_CLAMP - (1 << WARP_PARAM_REDUCE_BITS));
+  wm->wmtype = AFFINE;
+  wm->invalid = 0;
+}
+#endif  // DAMR_EXP_6P
 
 // Derivation of four parameters in the rotation-scale-translation affine model
 // (in the pipeline where gradients are computed directly from d0*P0-d1*P1)
@@ -1674,6 +1845,19 @@ void process_affine_refinement_subblock(int16_t *pdiff, int pstride,
   av2_avg_pooling_pdiff_gradients(pdiff, pstride, gx, gy, gstride, bw, bh,
                                   AFFINE_AVG_MAX_SIZE);
 
+#if DAMR_EXP_6P
+  if (bw >= DAMR_6P_MIN && bh >= DAMR_6P_MIN) {
+    Affine6Params p6 = { { 0, 0, 0, 0 }, 0, 0 };
+    if (!opfl_affine6_refinement(pdiff, pstride, gx, gy, gstride, bw, bh,
+                                 grad_prec_bits, &p6)) {
+      get_ref_affine6_params(bw, bh, mi_x, mi_y, &p6, wms, d0, &src_mv[0],
+                             sf[0]);
+      get_ref_affine6_params(bw, bh, mi_x, mi_y, &p6, wms + 1, d1, &src_mv[1],
+                             sf[1]);
+    }
+    return;
+  }
+#endif  // DAMR_EXP_6P
   AffineModelParams affine_params = default_affine_params;
   // In some rare cases, the determinant in the solver may be zero or
   // negative due to numerical errors. In this case we still set invalid=0,
@@ -1892,8 +2076,20 @@ void av2_get_optflow_based_mv(const AV2_COMMON *cm, MACROBLOCKD *xd, int plane,
   av2_copy_pred_array_highbd(dst0, dst1, dst_stride, tmp0, tmp1, bw, bh, d0, d1,
                              xd->bd, 0);
 #if CONFIG_AFFINE_REFINEMENT
-  if (mbmi->comp_refine_type >= COMP_AFFINE_REFINE_START && wms)
+  const int exp_flags = damr_exp_flags();
+  if (mbmi->comp_refine_type >= COMP_AFFINE_REFINE_START && wms) {
     *use_affine_opfl = 1;
+    if (exp_flags & DAMR_EXP_SAD_GATE) {
+      // Legacy F107 rule: only apply the affine model when the two
+      // predictions differ by at least one unit per pixel on average.
+      int64_t sad = 0;
+      for (int i = 0; i < bh; i++)
+        for (int j = 0; j < bw; j++)
+          sad += abs((int)dst0[i * dst_stride + j] -
+                     (int)dst1[i * dst_stride + j]);
+      if (sad < (int64_t)bw * bh) *use_affine_opfl = 0;
+    }
+  }
 #endif  // CONFIG_AFFINE_REFINEMENT
 
   // Buffers gx0 and gy0 are used to store the
@@ -1913,13 +2109,36 @@ void av2_get_optflow_based_mv(const AV2_COMMON *cm, MACROBLOCKD *xd, int plane,
     av2_opfl_affine_refinement_mxn(tmp1, bw, gx0, gy0, bw, bw, bh, d0, d1, mi_x,
                                    mi_y, best_mv_ref, grad_prec_bits, wms, sf);
 
+    const int post_check = (exp_flags & DAMR_EXP_POST_CHECK) != 0;
+    // dst0/dst1 are left intact by the affine update, so the pre-warp
+    // differences can be rebuilt from them if a fallback is needed.
+    const int64_t sad_before =
+        post_check ? damr_pdiff_sad(tmp1, bw, bw, bh) : 0;
+
     update_pred_grad_with_affine_model(xd, plane, bw, bh, wms, mi_x, mi_y, tmp0,
                                        tmp1, gx0, gy0, d0, d1, &grad_prec_bits,
                                        cm, mbmi, pu_width, pu_height);
 
-    // Subblock wise translational refinement
-    if (damr_refine_subblock(plane, bw, bh, mbmi->comp_refine_type, n, n)) {
-      // Find translational parameters per subblock.
+    if (post_check && damr_pdiff_sad(tmp1, bw, bw, bh) > sad_before) {
+      // The affine model increased the inter-reference error: discard it and
+      // apply the translational sub-block refinement on the original
+      // predictions instead.
+      *use_affine_opfl = 0;
+      av2_copy_pred_array_highbd(dst0, dst1, dst_stride, tmp0, tmp1, bw, bh,
+                                 d0, d1, xd->bd, 0);
+      av2_compute_subpel_gradients_interp(tmp0, bw, bh, &grad_prec_bits,
+#if CONFIG_AFFINE_REFINEMENT_SB
+                                          0,
+#endif  // CONFIG_AFFINE_REFINEMENT_SB
+                                          gx0, gy0);
+      n_blocks = av2_opfl_mv_refinement_nxn(
+          tmp1, bw, gx0, gy0, bw, bw, bh, n, d0, d1, grad_prec_bits,
+          target_prec, mi_x, mi_y, cm->mi_params.mi_cols,
+          cm->mi_params.mi_rows, build_for_decode, vx0, vy0, vx1, vy1);
+    } else if (damr_refine_subblock(plane, bw, bh, mbmi->comp_refine_type, n,
+                                    n)) {
+      // Subblock wise translational refinement: find translational
+      // parameters per subblock.
       n_blocks = av2_opfl_mv_refinement_nxn(
           tmp1, bw, gx0, gy0, bw, bw, bh, n, d0, d1, grad_prec_bits,
           target_prec, mi_x, mi_y, cm->mi_params.mi_cols, cm->mi_params.mi_rows,
