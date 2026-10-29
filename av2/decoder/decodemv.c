@@ -773,30 +773,23 @@ static PREDICTION_MODE read_inter_compound_mode(MACROBLOCKD *xd, avm_reader *r,
 
   if (cm->features.opfl_refine_type == REFINE_SWITCHABLE &&
       opfl_allowed_cur_refs_bsize(cm, xd, mbmi)) {
-    const int allow_translational_refinement =
-        is_translational_refinement_allowed(
-            cm, mbmi->sb_type[xd->tree_type == CHROMA_PART], xd,
-            comp_idx_to_opfl_mode[mode]);
-#if CONFIG_AFFINE_REFINEMENT
-    const int allow_affine_refinement =
-        is_affine_refinement_allowed(cm, xd, comp_idx_to_opfl_mode[mode]);
-    if (allow_affine_refinement || allow_translational_refinement) {
-#else
-    if (allow_translational_refinement) {
-#endif  // CONFIG_AFFINE_REFINEMENT
-      const int opfl_ctx = get_optflow_context(comp_idx_to_opfl_mode[mode]);
+    const PREDICTION_MODE opfl_mode = comp_idx_to_opfl_mode[mode];
+    const BLOCK_SIZE bsize = mbmi->sb_type[xd->tree_type == CHROMA_PART];
+    if (is_comp_opfl_refinement_allowed(cm, xd, bsize, opfl_mode)) {
+      const int opfl_ctx = get_optflow_context(opfl_mode);
       use_optical_flow =
           avm_read_symbol(r, xd->tile_ctx->use_optflow_cdf[opfl_ctx], 2,
                           ACCT_INFO("use_optical_flow"));
     }
 #if CONFIG_AFFINE_REFINEMENT
     mbmi->comp_refine_type =
-        use_optical_flow ? COMP_REFINE_SUBBLK2P + allow_affine_refinement
+        use_optical_flow ? COMP_REFINE_SUBBLK2P +
+                               is_affine_refinement_allowed(cm, xd, opfl_mode)
                          : COMP_REFINE_NONE;
 #endif  // CONFIG_AFFINE_REFINEMENT
     if (use_optical_flow) {
-      assert(is_inter_compound_mode(comp_idx_to_opfl_mode[mode]));
-      return comp_idx_to_opfl_mode[mode];
+      assert(is_inter_compound_mode(opfl_mode));
+      return opfl_mode;
     }
   }
 
@@ -2696,9 +2689,6 @@ static void read_inter_block_mode_info(AV2Decoder *const pbi,
 
   mbmi->warp_ref_idx = 0;
   mbmi->max_num_warp_candidates = 0;
-#if CONFIG_AFFINE_REFINEMENT
-  mbmi->comp_refine_type = COMP_REFINE_NONE;
-#endif  // CONFIG_AFFINE_REFINEMENT
 
   mbmi->warpmv_with_mvd_flag = 0;
   mbmi->motion_mode = SIMPLE_TRANSLATION;

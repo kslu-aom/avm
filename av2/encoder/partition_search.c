@@ -1348,19 +1348,10 @@ static void update_stats(const AV2_COMMON *const cm, ThreadData *td) {
       if (cm->features.opfl_refine_type == REFINE_SWITCHABLE &&
           opfl_allowed_cur_refs_bsize(cm, xd, mbmi)) {
         const int use_optical_flow = mode >= NEAR_NEARMV_OPTFLOW;
-        const int allow_translational_refinement =
-            is_translational_refinement_allowed(
-                cm, mbmi->sb_type[xd->tree_type == CHROMA_PART], xd,
-                comp_idx_to_opfl_mode[comp_mode_idx]);
-#if CONFIG_AFFINE_REFINEMENT
-        const int allow_affine = is_affine_refinement_allowed(
-            cm, xd, comp_idx_to_opfl_mode[comp_mode_idx]);
-        if (allow_affine || allow_translational_refinement) {
-#else
-        if (allow_translational_refinement) {
-#endif  // CONFIG_AFFINE_REFINEMENT
-          const int opfl_ctx =
-              get_optflow_context(comp_idx_to_opfl_mode[comp_mode_idx]);
+        const PREDICTION_MODE opfl_mode = comp_idx_to_opfl_mode[comp_mode_idx];
+        const BLOCK_SIZE sb_bsize = mbmi->sb_type[xd->tree_type == CHROMA_PART];
+        if (is_comp_opfl_refinement_allowed(cm, xd, sb_bsize, opfl_mode)) {
+          const int opfl_ctx = get_optflow_context(opfl_mode);
 #if CONFIG_ENTROPY_STATS
           ++counts->use_optflow[opfl_ctx][use_optical_flow];
 #endif

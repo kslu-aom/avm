@@ -561,7 +561,7 @@ void av2_opfl_rebuild_inter_predictor(
     int build_for_decode, const AV2_COMMON *cm, int pu_width,
 #if CONFIG_AFFINE_REFINEMENT
     int *vxy_bufs, const int vxy_size, CompoundRefineType comp_refine_type,
-    WarpedMotionParams *wms, int_mv *mv, const int use_affine_opfl,
+    WarpedMotionParams *wms, const int use_affine_opfl,
 #endif  // CONFIG_AFFINE_REFINEMENT
     int ref, uint16_t **mc_buf, CalcSubpelParamsFunc calc_subpel_params_func,
     int use_4x4, MB_MODE_INFO *mi, int pu_height, const MV mi_mv[2],
@@ -752,6 +752,18 @@ static INLINE int is_translational_refinement_allowed(const AV2_COMMON *cm,
 }
 #endif  // CONFIG_AFFINE_REFINEMENT
 
+static INLINE int is_comp_opfl_refinement_allowed(const AV2_COMMON *cm,
+                                                  const MACROBLOCKD *xd,
+                                                  BLOCK_SIZE bsize,
+                                                  PREDICTION_MODE opfl_mode) {
+#if CONFIG_AFFINE_REFINEMENT
+  return is_affine_refinement_allowed(cm, xd, opfl_mode) ||
+         is_translational_refinement_allowed(cm, bsize, xd, opfl_mode);
+#else
+  return is_translational_refinement_allowed(cm, bsize, xd, opfl_mode);
+#endif  // CONFIG_AFFINE_REFINEMENT
+}
+
 void highbd_build_mc_border(const uint16_t *src, int src_stride, uint16_t *dst,
                             int dst_stride, int x, int y, int b_w, int b_h,
                             int w, int h);
@@ -808,33 +820,6 @@ static INLINE int is_refinemv_allowed_bsize(BLOCK_SIZE bsize) {
   return (block_size_wide[bsize] >= 16 || block_size_high[bsize] >= 16);
 }
 
-#if CONFIG_AFFINE_REFINEMENT
-// Experiment: allow DAMR on top of the SMVR (refinemv) sub-block search for
-// NEAR_NEARMV_OPTFLOW (affine models are then derived per 16x16 refinemv
-// unit).
-#ifndef DAMR_EXP_REFINEMV
-#define DAMR_EXP_REFINEMV 0
-#endif
-// Experiment: fix the sign of the translation term for past references
-// (d > 0) so that t' = -d * (A^-1 * t) is used, matching the model
-// derivation.
-// Experiment: 6-parameter affine model for affine units >= DAMR_6P_MIN.
-#ifndef DAMR_EXP_6P
-#define DAMR_EXP_6P 0
-#endif
-#ifndef DAMR_EXP_TXFIX
-#define DAMR_EXP_TXFIX 0
-#endif
-static INLINE int is_damr_allowed_with_refinemv(const PREDICTION_MODE mode) {
-#if DAMR_EXP_REFINEMV
-  return mode == NEAR_NEARMV_OPTFLOW;
-#else
-  (void)mode;
-  return 0;
-#endif  // DAMR_EXP_REFINEMV
-}
-#endif  // CONFIG_AFFINE_REFINEMENT
-
 // check if the refinemv mode is allwed for a given mode and precision
 static INLINE int is_refinemv_allowed_mode_precision(
     PREDICTION_MODE mode, MvSubpelPrecision precision,
@@ -857,7 +842,6 @@ static INLINE int is_refinemv_allowed_mode_precision(
 
 #if CONFIG_AFFINE_REFINEMENT
   if (cm->seq_params.enable_affine_refine) {
-    if (is_damr_allowed_with_refinemv(mode)) return 1;
     if (cm->features.opfl_refine_type == REFINE_ALL) return 0;
     return mode == NEAR_NEARMV;
   }
@@ -866,22 +850,18 @@ static INLINE int is_refinemv_allowed_mode_precision(
 }
 
 // check if the prediction mode infered to refimemv to always 1.
-#if CONFIG_AFFINE_REFINEMENT
 static INLINE int default_refinemv_modes(const AV2_COMMON *cm,
                                          const MB_MODE_INFO *mbmi) {
+#if CONFIG_AFFINE_REFINEMENT
   if (cm->seq_params.enable_affine_refine) {
-    if (is_damr_allowed_with_refinemv(mbmi->mode)) return 1;
     return mbmi->mode == NEAR_NEARMV || mbmi->mode == JOINT_NEWMV;
   }
-  return (mbmi->mode == NEAR_NEARMV || mbmi->mode == NEAR_NEARMV_OPTFLOW ||
-          mbmi->mode == JOINT_NEWMV_OPTFLOW);
-}
 #else
-static INLINE int default_refinemv_modes(const MB_MODE_INFO *mbmi) {
+  (void)cm;
+#endif  // CONFIG_AFFINE_REFINEMENT
   return (mbmi->mode == NEAR_NEARMV || mbmi->mode == NEAR_NEARMV_OPTFLOW ||
           mbmi->mode == JOINT_NEWMV_OPTFLOW);
 }
-#endif  // CONFIG_AFFINE_REFINEMENT
 // Check if the compound and equal distance references
 static INLINE int is_refinemv_allowed_reference(const AV2_COMMON *cm,
                                                 const MB_MODE_INFO *mbmi) {
@@ -1069,11 +1049,7 @@ static INLINE int get_default_refinemv_flag(const AV2_COMMON *const cm,
            ? is_refinemv_allowed_skip_mode(cm, mbmi)
            : is_refinemv_allowed(cm, mbmi, mbmi->sb_type[PLANE_TYPE_Y]));
   if (is_refinemv) {
-#if CONFIG_AFFINE_REFINEMENT
     if (default_refinemv_modes(cm, mbmi)) return 1;
-#else
-    if (default_refinemv_modes(mbmi)) return 1;
-#endif  // CONFIG_AFFINE_REFINEMENT
   }
   return 0;
 }
@@ -1087,11 +1063,7 @@ static INLINE int switchable_refinemv_flag(const AV2_COMMON *const cm,
            ? is_refinemv_allowed_skip_mode(cm, mbmi)
            : is_refinemv_allowed(cm, mbmi, mbmi->sb_type[PLANE_TYPE_Y]));
   if (is_refinemv && !is_tip_ref_frame(mbmi->ref_frame[0])) {
-#if CONFIG_AFFINE_REFINEMENT
     if (default_refinemv_modes(cm, mbmi)) return 0;
-#else
-    if (default_refinemv_modes(mbmi)) return 0;
-#endif  // CONFIG_AFFINE_REFINEMENT
     return 1;
   }
 
@@ -1173,9 +1145,9 @@ void av2_opfl_mv_refinement(const int16_t *pdiff, int pstride0,
                             int *vy1);
 void av2_compute_subpel_gradients_interp(int16_t *pred_dst, int bw, int bh,
                                          int *grad_prec_bits,
-#if CONFIG_AFFINE_REFINEMENT_SB
+#if CONFIG_AFFINE_REFINEMENT && CONFIG_AFFINE_REFINEMENT_SB
                                          int use_affine,
-#endif  // CONFIG_AFFINE_REFINEMENT_SB
+#endif  // CONFIG_AFFINE_REFINEMENT && CONFIG_AFFINE_REFINEMENT_SB
                                          int16_t *x_grad, int16_t *y_grad);
 
 // TODO(jkoleszar): yet another mv clamping function :-(

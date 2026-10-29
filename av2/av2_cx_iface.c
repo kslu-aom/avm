@@ -210,9 +210,8 @@ struct av2_extracfg {
   avm_opfl_refine_type enable_opfl_refine;  // optical flow refinement type
                                             // for sequence
 #if CONFIG_AFFINE_REFINEMENT
-  avm_opfl_refine_type enable_affine_refine;  // enable affine refinement
-                                              // for sequence
-#endif                                        // CONFIG_AFFINE_REFINEMENT
+  int enable_affine_refine;  // enable affine refinement for sequence
+#endif                       // CONFIG_AFFINE_REFINEMENT
 #if CONFIG_DENOISE
   float noise_level;
   int noise_block_size;

@@ -601,7 +601,7 @@ static AVM_INLINE void tip_build_inter_predictors_8x8(
           mi_y, 0 /* build_for_decode */, cm, bw,
 #if CONFIG_AFFINE_REFINEMENT
           vxy_bufs, 4, mbmi->comp_refine_type, use_affine_opfl ? wms : NULL,
-          &mbmi->mv[ref], use_affine_opfl,
+          use_affine_opfl,
 #endif  // CONFIG_AFFINE_REFINEMENT
           ref, mc_buf, calc_subpel_params_func, use_4x4, mbmi, bh, mv, 0
 #if CONFIG_AFFINE_REFINEMENT

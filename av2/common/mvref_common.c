@@ -154,7 +154,69 @@ static INLINE MV get_sub_block_warp_mv(const WarpedMotionParams *warp_params,
   return submv;
 }
 
+// Adds the per-8x8 translational optical-flow MV offset (averaging 4 subblocks
+// when the refinement grid is 4x4) in 1/8-pel units.
+static INLINE MV apply_8x8_opfl_mv_offset(MV mv, int n, int sbmv_stride, int w,
+                                          int h, const int *vx, const int *vy) {
+  if (n == 4) {
+    mv.row += ROUND_POWER_OF_TWO_SIGNED(vy[0] + vy[1] + vy[2] + vy[3],
+                                        2 + MV_REFINE_PREC_BITS - 3);
+    mv.col += ROUND_POWER_OF_TWO_SIGNED(vx[0] + vx[1] + vx[2] + vx[3],
+                                        2 + MV_REFINE_PREC_BITS - 3);
+  } else {
+    const int idx = h * sbmv_stride + w;
+    mv.row += ROUND_POWER_OF_TWO_SIGNED(vy[idx], MV_REFINE_PREC_BITS - 3);
+    mv.col += ROUND_POWER_OF_TWO_SIGNED(vx[idx], MV_REFINE_PREC_BITS - 3);
+  }
+  return mv;
+}
+
 #define OPFL_MVS_CLAMPED 0
+
+static INLINE MV compute_tmvp_8x8_refined_mv(const MACROBLOCKD *xd,
+                                             const MB_MODE_INFO *mi, int mi_row,
+                                             int mi_col, int bw, int bh, int n,
+                                             int w, int h, int idx,
+                                             bool is_opfl_mode,
+                                             int apply_sub_block_refinemv) {
+#if CONFIG_AFFINE_REFINEMENT
+  if (is_opfl_mode && xd->use_affine_opfl &&
+      mi->comp_refine_type >= COMP_AFFINE_REFINE_START &&
+      !apply_sub_block_refinemv) {
+    const int32_t pixel_x = mi_col * MI_SIZE + w * TMVP_MI_SIZE;
+    const int32_t pixel_y = mi_row * MI_SIZE + h * TMVP_MI_SIZE;
+#if CONFIG_AFFINE_REFINEMENT_SB
+    const int sub_bw = AVMMIN(AFFINE_MAX_UNIT, bw);
+    const int sub_bh = AVMMIN(AFFINE_MAX_UNIT, bh);
+    const int sb_idx = ((h * 8) / sub_bh) * (bw / sub_bw) + (w * 8) / sub_bw;
+    const WarpedMotionParams *wm_params = &xd->wm_params_sb[sb_idx * 2 + idx];
+#else
+    const WarpedMotionParams *wm_params = &mi->wm_params[idx];
+#endif  // CONFIG_AFFINE_REFINEMENT_SB
+    (void)bh;
+    return get_sub_block_warp_mv(wm_params, pixel_x, pixel_y, TMVP_MI_SIZE,
+                                 TMVP_MI_SIZE);
+  }
+#else
+  (void)mi_row;
+  (void)mi_col;
+  (void)bh;
+#endif  // CONFIG_AFFINE_REFINEMENT
+  // Refined MVs are stored per 4x4 in refinemv_subinfo, but h and w for TMVP
+  // are per 8x8, so (h<<1) and (w<<1) are used here.
+  MV refined_mv = apply_sub_block_refinemv
+                      ? xd->refinemv_subinfo[(h << 1) * MAX_MIB_SIZE + (w << 1)]
+                            .refinemv[idx]
+                            .as_mv
+                      : mi->mv[idx].as_mv;
+  if (is_opfl_mode) {
+    const int *vx = xd->opfl_vxy_bufs + (idx ? N_OF_OFFSETS : 0);
+    const int *vy = xd->opfl_vxy_bufs + N_OF_OFFSETS * (2 + idx);
+    refined_mv = apply_8x8_opfl_mv_offset(refined_mv, n, bw >> 3, w, h, vx, vy);
+  }
+  return refined_mv;
+}
+
 // Overwrite the MVs in TMVP list by optical flow refined MVs (for TIP frame
 // mode)
 void av2_copy_frame_refined_mvs_tip_frame_mode(const AV2_COMMON *const cm,
@@ -178,30 +240,11 @@ void av2_copy_frame_refined_mvs_tip_frame_mode(const AV2_COMMON *const cm,
   const bool is_opfl_mode =
       is_optflow_refinement_enabled(cm, xd, mi, AVM_PLANE_Y, tip_ref_frame);
   int n = opfl_get_subblock_size(bw, bh, AVM_PLANE_Y, use_4x4);
-#if CONFIG_AFFINE_REFINEMENT && CONFIG_AFFINE_REFINEMENT_SB
-  // Affine models are stored per AFFINE_MAX_UNIT, or per refinemv sub-block
-  // when DAMR is applied on top of the SMVR search.
-  const int damr_unit =
-      (mi->refinemv_flag && is_damr_allowed_with_refinemv(mi->mode))
-          ? REFINEMV_SUBBLOCK_WIDTH
-          : AFFINE_MAX_UNIT;
-  int sb_idx = 0;
-  int sub_bw = AVMMIN(damr_unit, bw);
-  int sub_bh = AVMMIN(damr_unit, bh);
-  int wms_stride = bw / sub_bw;
-#endif  // CONFIG_AFFINE_REFINEMENT && CONFIG_AFFINE_REFINEMENT_SB
-
-  // Pointers to hold optical flow MV offsets.
-  int *vx0 = xd->opfl_vxy_bufs;
-  int *vx1 = xd->opfl_vxy_bufs + (N_OF_OFFSETS * 1);
-  int *vy0 = xd->opfl_vxy_bufs + (N_OF_OFFSETS * 2);
-  int *vy1 = xd->opfl_vxy_bufs + (N_OF_OFFSETS * 3);
 
   int apply_sub_block_refinemv =
       tip_ref_frame ||
 #if CONFIG_AFFINE_REFINEMENT
-      (mi->refinemv_flag && (is_damr_allowed_with_refinemv(mi->mode) ||
-                             mi->comp_refine_type < COMP_AFFINE_REFINE_START));
+      (mi->refinemv_flag && mi->comp_refine_type < COMP_AFFINE_REFINE_START);
 #else
       mi->refinemv_flag;
 #endif  // CONFIG_AFFINE_REFINEMENT
@@ -213,9 +256,6 @@ void av2_copy_frame_refined_mvs_tip_frame_mode(const AV2_COMMON *const cm,
   for (int h = 0; h < y_inside_boundary; h++) {
     MV_REF *mv = frame_mvs;
     for (int w = 0; w < x_inside_boundary; w++) {
-#if CONFIG_AFFINE_REFINEMENT && CONFIG_AFFINE_REFINEMENT_SB
-      sb_idx = ((h * 8) / sub_bh) * wms_stride + (w * 8) / sub_bw;
-#endif  // CONFIG_AFFINE_REFINEMENT && CONFIG_AFFINE_REFINEMENT_SB
       for (int idx = 0; idx < 2; ++idx) {
         mv->ref_frame[idx] = NONE_FRAME;
         mv->mv[idx].as_int = 0;
@@ -223,53 +263,9 @@ void av2_copy_frame_refined_mvs_tip_frame_mode(const AV2_COMMON *const cm,
         if (!is_inter_ref_frame(ref_frame) && !tip_ref_frame) continue;
 
         int_mv refined_mv;
-#if CONFIG_AFFINE_REFINEMENT
-        if (is_opfl_mode && xd->use_affine_opfl &&
-            mi->comp_refine_type >= COMP_AFFINE_REFINE_START &&
-            (is_damr_allowed_with_refinemv(mi->mode) ||
-             !apply_sub_block_refinemv)) {
-          const int32_t pixel_x = mi_col * MI_SIZE + w * TMVP_MI_SIZE;
-          const int32_t pixel_y = mi_row * MI_SIZE + h * TMVP_MI_SIZE;
-#if CONFIG_AFFINE_REFINEMENT_SB
-          const WarpedMotionParams *wm_params =
-              &xd->wm_params_sb[sb_idx * 2 + idx];
-#else
-          const WarpedMotionParams *wm_params = &mi->wm_params[idx];
-#endif  // CONFIG_AFFINE_REFINEMENT_SB
-          refined_mv.as_mv = get_sub_block_warp_mv(wm_params, pixel_x, pixel_y,
-                                                   TMVP_MI_SIZE, TMVP_MI_SIZE);
-        } else {
-#endif  // CONFIG_AFFINE_REFINEMENT
-          // Refined MVs are stored per 4x4 in refinemv_subinfo, but h and
-          // w for TMVP are per 8x8, so (h<<1) and (w<<1) are used here.
-          if (apply_sub_block_refinemv)
-            refined_mv.as_mv =
-                xd->refinemv_subinfo[(h << 1) * MAX_MIB_SIZE + (w << 1)]
-                    .refinemv[idx]
-                    .as_mv;
-          else
-            refined_mv.as_mv = mi->mv[idx].as_mv;
-          if (is_opfl_mode) {
-            int *vy = idx ? vy1 : vy0;
-            int *vx = idx ? vx1 : vx0;
-            if (n == 4) {
-              // Since TMVP is stored per 8x8 unit, for refined MV with 4x4
-              // subblock, take the average of 4 refined MVs
-              refined_mv.as_mv.row += ROUND_POWER_OF_TWO_SIGNED(
-                  vy[0] + vy[1] + vy[2] + vy[3], 2 + MV_REFINE_PREC_BITS - 3);
-              refined_mv.as_mv.col += ROUND_POWER_OF_TWO_SIGNED(
-                  vx[0] + vx[1] + vx[2] + vx[3], 2 + MV_REFINE_PREC_BITS - 3);
-            } else {
-              int sbmv_stride = bw >> 3;
-              refined_mv.as_mv.row += ROUND_POWER_OF_TWO_SIGNED(
-                  vy[h * sbmv_stride + w], MV_REFINE_PREC_BITS - 3);
-              refined_mv.as_mv.col += ROUND_POWER_OF_TWO_SIGNED(
-                  vx[h * sbmv_stride + w], MV_REFINE_PREC_BITS - 3);
-            }
-          }
-#if CONFIG_AFFINE_REFINEMENT
-        }
-#endif  // CONFIG_AFFINE_REFINEMENT
+        refined_mv.as_mv = compute_tmvp_8x8_refined_mv(
+            xd, mi, mi_row, mi_col, bw, bh, n, w, h, idx, is_opfl_mode,
+            apply_sub_block_refinemv);
 #if OPFL_MVS_CLAMPED
         refined_mv.as_mv.row =
             clamp(refined_mv.as_mv.row, -REFMVS_LIMIT, REFMVS_LIMIT);
@@ -433,92 +429,26 @@ void av2_copy_frame_refined_mvs(const AV2_COMMON *const cm,
       ;
   int n = opfl_get_subblock_size(bw, bh, AVM_PLANE_Y, 1);
   int w, h;
-#if CONFIG_AFFINE_REFINEMENT && CONFIG_AFFINE_REFINEMENT_SB
-  // Affine models are stored per AFFINE_MAX_UNIT, or per refinemv sub-block
-  // when DAMR is applied on top of the SMVR search.
-  const int damr_unit =
-      (mi->refinemv_flag && is_damr_allowed_with_refinemv(mi->mode))
-          ? REFINEMV_SUBBLOCK_WIDTH
-          : AFFINE_MAX_UNIT;
-  int sb_idx = 0;
-  int sub_bw = AVMMIN(damr_unit, bw);
-  int sub_bh = AVMMIN(damr_unit, bh);
-  int wms_stride = bw / sub_bw;
-#endif  // CONFIG_AFFINE_REFINEMENT && CONFIG_AFFINE_REFINEMENT_SB
-
-  // Pointers to hold optical flow MV offsets.
-  int *vx0 = xd->opfl_vxy_bufs;
-  int *vx1 = xd->opfl_vxy_bufs + (N_OF_OFFSETS * 1);
-  int *vy0 = xd->opfl_vxy_bufs + (N_OF_OFFSETS * 2);
-  int *vy1 = xd->opfl_vxy_bufs + (N_OF_OFFSETS * 3);
 
   int apply_sub_block_refinemv =
       mi->refinemv_flag &&
 #if CONFIG_AFFINE_REFINEMENT
-      (is_damr_allowed_with_refinemv(mi->mode) ||
-       mi->comp_refine_type < COMP_AFFINE_REFINE_START) &&
+      mi->comp_refine_type < COMP_AFFINE_REFINE_START &&
 #endif  // CONFIG_AFFINE_REFINEMENT
       !is_tip_ref_frame(mi->ref_frame[0]);
 
   for (h = 0; h < y_inside_boundary; h++) {
     MV_REF *mv = frame_mvs;
     for (w = 0; w < x_inside_boundary; w++) {
-#if CONFIG_AFFINE_REFINEMENT && CONFIG_AFFINE_REFINEMENT_SB
-      sb_idx = ((h * 8) / sub_bh) * wms_stride + (w * 8) / sub_bw;
-#endif  // CONFIG_AFFINE_REFINEMENT && CONFIG_AFFINE_REFINEMENT_SB
       for (int idx = 0; idx < 2; ++idx) {
         mv->ref_frame[idx] = NONE_FRAME;
         mv->mv[idx].as_int = 0;
         MV_REFERENCE_FRAME ref_frame = mi->ref_frame[idx];
         if (is_inter_ref_frame(ref_frame)) {
           int_mv refined_mv;
-#if CONFIG_AFFINE_REFINEMENT
-          if (is_opfl_mode && xd->use_affine_opfl &&
-              mi->comp_refine_type >= COMP_AFFINE_REFINE_START &&
-              (is_damr_allowed_with_refinemv(mi->mode) ||
-               !apply_sub_block_refinemv)) {
-            const int32_t pixel_x = mi_col * MI_SIZE + w * TMVP_MI_SIZE;
-            const int32_t pixel_y = mi_row * MI_SIZE + h * TMVP_MI_SIZE;
-#if CONFIG_AFFINE_REFINEMENT_SB
-            const WarpedMotionParams *wm_params =
-                &xd->wm_params_sb[sb_idx * 2 + idx];
-#else
-            const WarpedMotionParams *wm_params = &mi->wm_params[idx];
-#endif  // CONFIG_AFFINE_REFINEMENT_SB
-            refined_mv.as_mv = get_sub_block_warp_mv(
-                wm_params, pixel_x, pixel_y, TMVP_MI_SIZE, TMVP_MI_SIZE);
-          } else {
-#endif  // CONFIG_AFFINE_REFINEMENT
-            // Refined MVs are stored per 4x4 in refinemv_subinfo, but h and
-            // w for TMVP are per 8x8, so (h<<1) and (w<<1) are used here.
-            if (apply_sub_block_refinemv)
-              refined_mv.as_mv =
-                  xd->refinemv_subinfo[(h << 1) * MAX_MIB_SIZE + (w << 1)]
-                      .refinemv[idx]
-                      .as_mv;
-            else
-              refined_mv.as_mv = mi->mv[idx].as_mv;
-            if (is_opfl_mode) {
-              int *vy = idx ? vy1 : vy0;
-              int *vx = idx ? vx1 : vx0;
-              if (n == 4) {
-                // Since TMVP is stored per 8x8 unit, for refined MV with 4x4
-                // subblock, take the average of 4 refined MVs
-                refined_mv.as_mv.row += ROUND_POWER_OF_TWO_SIGNED(
-                    vy[0] + vy[1] + vy[2] + vy[3], 2 + MV_REFINE_PREC_BITS - 3);
-                refined_mv.as_mv.col += ROUND_POWER_OF_TWO_SIGNED(
-                    vx[0] + vx[1] + vx[2] + vx[3], 2 + MV_REFINE_PREC_BITS - 3);
-              } else {
-                int sbmv_stride = bw >> 3;
-                refined_mv.as_mv.row += ROUND_POWER_OF_TWO_SIGNED(
-                    vy[h * sbmv_stride + w], MV_REFINE_PREC_BITS - 3);
-                refined_mv.as_mv.col += ROUND_POWER_OF_TWO_SIGNED(
-                    vx[h * sbmv_stride + w], MV_REFINE_PREC_BITS - 3);
-              }
-            }
-#if CONFIG_AFFINE_REFINEMENT
-          }
-#endif  // CONFIG_AFFINE_REFINEMENT
+          refined_mv.as_mv = compute_tmvp_8x8_refined_mv(
+              xd, mi, mi_row, mi_col, bw, bh, n, w, h, idx, is_opfl_mode,
+              apply_sub_block_refinemv);
 #if OPFL_MVS_CLAMPED
           refined_mv.as_mv.row =
               clamp(refined_mv.as_mv.row, -REFMVS_LIMIT, REFMVS_LIMIT);

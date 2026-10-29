@@ -955,7 +955,7 @@ typedef struct {
   avm_opfl_refine_type enable_opfl_refine;
 #if CONFIG_AFFINE_REFINEMENT
   // Indicates if affine optical flow refinement should be enabled
-  avm_opfl_refine_type enable_affine_refine;
+  int enable_affine_refine;
 #endif  // CONFIG_AFFINE_REFINEMENT
   // Indicates if BRU is enabled and the mode
   unsigned int enable_bru;

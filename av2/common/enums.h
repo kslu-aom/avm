@@ -928,6 +928,13 @@ enum {
 } UENUM1BYTE(MOTION_MODE);
 
 #if CONFIG_AFFINE_REFINEMENT
+// Optional 6-parameter general affine model on units >= DAMR_6P_MIN.
+#ifndef DAMR_EXP_6P
+#define DAMR_EXP_6P 0
+#endif
+#ifndef DAMR_6P_MIN
+#define DAMR_6P_MIN 32
+#endif
 #if CONFIG_AFFINE_REFINEMENT_SB
 // Max affine refinement unit size
 #ifndef AFFINE_MAX_UNIT_LOG2
@@ -936,8 +943,7 @@ enum {
 #define AFFINE_MAX_UNIT (1 << AFFINE_MAX_UNIT_LOG2)
 #endif  // CONFIG_AFFINE_REFINEMENT_SB
 
-// The array size must be sufficient to hold the warp models per 16x16
-// subblock in the refinemv mode
+// Maximum number of 16x16 affine units along one superblock dimension.
 #define MAX_NUM_AFFINE_UNITS_1D_LOG2 (MAX_SB_SIZE_LOG2 - 4)
 #define NUM_AFFINE_PARAMS_1D (1 << MAX_NUM_AFFINE_UNITS_1D_LOG2)
 #define NUM_AFFINE_PARAMS (NUM_AFFINE_PARAMS_1D * NUM_AFFINE_PARAMS_1D)

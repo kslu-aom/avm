@@ -497,23 +497,17 @@ static int cost_prediction_mode(const ModeCosts *const mode_costs,
     if (cm->features.opfl_refine_type == REFINE_SWITCHABLE &&
         opfl_allowed_cur_refs_bsize(cm, xd, mbmi)) {
       const int use_optical_flow = mode >= NEAR_NEARMV_OPTFLOW;
+      const PREDICTION_MODE opfl_mode = comp_idx_to_opfl_mode[comp_mode_idx];
+      const BLOCK_SIZE bsize = mbmi->sb_type[xd->tree_type == CHROMA_PART];
 #if CONFIG_AFFINE_REFINEMENT
-      const int allow_translational = is_translational_refinement_allowed(
-          cm, mbmi->sb_type[xd->tree_type == CHROMA_PART], xd,
-          comp_idx_to_opfl_mode[comp_mode_idx]);
-      const int allow_affine = is_affine_refinement_allowed(
-          cm, xd, comp_idx_to_opfl_mode[comp_mode_idx]);
       if (use_optical_flow) {
-        assert(IMPLIES(allow_translational,
-                       mbmi->comp_refine_type > COMP_REFINE_NONE));
-        assert(IMPLIES(allow_affine,
+        assert(mbmi->comp_refine_type > COMP_REFINE_NONE);
+        assert(IMPLIES(is_affine_refinement_allowed(cm, xd, opfl_mode),
                        mbmi->comp_refine_type >= COMP_AFFINE_REFINE_START));
       }
-      if (allow_affine || allow_translational)
 #endif  // CONFIG_AFFINE_REFINEMENT
-      {
-        const int opfl_ctx =
-            get_optflow_context(comp_idx_to_opfl_mode[comp_mode_idx]);
+      if (is_comp_opfl_refinement_allowed(cm, xd, bsize, opfl_mode)) {
+        const int opfl_ctx = get_optflow_context(opfl_mode);
         use_optical_flow_cost +=
             mode_costs->use_optflow_cost[opfl_ctx][use_optical_flow];
       }
