@@ -928,12 +928,40 @@ enum {
 } UENUM1BYTE(MOTION_MODE);
 
 #if CONFIG_AFFINE_REFINEMENT
-// Optional 6-parameter general affine model on units >= DAMR_6P_MIN.
+// Research extensions for DAMR (all default to baseline hardware settings):
+// - DAMR_SMVP: expose per-8x8 DAMR motion vectors to spatial MV prediction.
+// - DAMR_STEP2_MV: include step-2 8x8 translational offsets (and guard invalid
+//   warp models) when exporting motion to SMVP and TMVP.
+// - DAMR_NO_POOL: accumulate exact unpooled 64-bit normal equations across the
+//   affine unit instead of 16x16 average pooling.
+// - DAMR_EXP_6P: solve a 6-parameter general affine model on units >=
+//   DAMR_6P_MIN.
+// - DAMR_WARP_ALIGN: use the 8-tap warp filter for the step-1 to step-2 handoff
+//   and preserve base MVs when the step-1 matrix is singular.
+// - DAMR_ENC_MVR: refine compound NEWMV candidates with DAMR enabled in the
+//   encoder.
+// - AFFINE_MAX_UNIT_LOG2: log2 maximum affine refinement unit size (5 = 32x32,
+//   6 = 64x64).
+#ifndef DAMR_SMVP
+#define DAMR_SMVP 0
+#endif
+#ifndef DAMR_STEP2_MV
+#define DAMR_STEP2_MV 0
+#endif
+#ifndef DAMR_NO_POOL
+#define DAMR_NO_POOL 0
+#endif
 #ifndef DAMR_EXP_6P
 #define DAMR_EXP_6P 0
 #endif
 #ifndef DAMR_6P_MIN
 #define DAMR_6P_MIN 32
+#endif
+#ifndef DAMR_WARP_ALIGN
+#define DAMR_WARP_ALIGN 0
+#endif
+#ifndef DAMR_ENC_MVR
+#define DAMR_ENC_MVR 0
 #endif
 #if CONFIG_AFFINE_REFINEMENT_SB
 // Max affine refinement unit size

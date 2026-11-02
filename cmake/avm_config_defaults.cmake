@@ -148,6 +148,20 @@ set_avm_config_var(CONFIG_AFFINE_REFINEMENT 1
                    "Decoder side affine motion refinement.")
 set_avm_config_var(CONFIG_AFFINE_REFINEMENT_SB 1
                    "Subblock based affine refinement")
+set_avm_config_var(AFFINE_MAX_UNIT_LOG2 5
+                   "Log2 max unit size for DAMR affine refinement (5=32, 6=64).")
+set_avm_config_var(DAMR_SMVP 0
+                   "Export DAMR 8x8 sub-block MVs to spatial MV prediction.")
+set_avm_config_var(DAMR_STEP2_MV 0
+                   "Include DAMR step-2 8x8 translational offsets in SMVP/TMVP.")
+set_avm_config_var(DAMR_NO_POOL 0
+                   "Use unpooled 64-bit gradient accumulation in DAMR step 1.")
+set_avm_config_var(DAMR_EXP_6P 0
+                   "Use 6-parameter general affine model in DAMR step 1.")
+set_avm_config_var(DAMR_WARP_ALIGN 0
+                   "Use 8-tap warp filter after DAMR step 1 before step 2.")
+set_avm_config_var(DAMR_ENC_MVR 0
+                   "Enable DAMR-aware compound NEWMV refinement in encoder.")
 
 set_avm_config_var(
   CONFIG_MIXED_LOSSLESS_ENCODE 0

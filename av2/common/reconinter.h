@@ -512,7 +512,9 @@ void av2_build_inter_predictors(const AV2_COMMON *cm, MACROBLOCKD *xd,
 
 // Precision of refined MV returned, 0 being integer pel. For now, only 1/8 or
 // 1/16-pel can be used.
+#ifndef MV_REFINE_PREC_BITS
 #define MV_REFINE_PREC_BITS 4  // (1/16-pel)
+#endif
 
 #define OPFL_PRED_MAX ((1 << 10) - 1)
 

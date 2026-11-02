@@ -304,8 +304,82 @@ static INLINE int_mv get_int_warp_mv_for_fb(const MACROBLOCKD *xd,
   return res;
 }
 
+// Computes the 8x8 sub-block warp motion vector from the warp model.
+static INLINE MV get_sub_block_warp_mv(const WarpedMotionParams *warp_params,
+                                       int pixel_x, int pixel_y, int bw,
+                                       int bh) {
+  const int center_x = pixel_x + (bw >> 1);
+  const int center_y = pixel_y + (bh >> 1);
+
+  const int32_t submv_x_hp = get_subblk_offset_x_hp(
+      warp_params->wmmat, center_x, center_y, 1 << WARPEDMODEL_PREC_BITS);
+  const int32_t submv_y_hp = get_subblk_offset_y_hp(
+      warp_params->wmmat, center_x, center_y, 1 << WARPEDMODEL_PREC_BITS);
+
+  MV submv;
+  submv.col = ROUND_POWER_OF_TWO_SIGNED(submv_x_hp, WARPEDMODEL_PREC_BITS - 3);
+  submv.row = ROUND_POWER_OF_TWO_SIGNED(submv_y_hp, WARPEDMODEL_PREC_BITS - 3);
+  return submv;
+}
+
+#ifndef MV_REFINE_PREC_BITS
+#define MV_REFINE_PREC_BITS 4
+#endif
+
+// Adds the per-8x8 translational optical-flow MV offset (averaging 4 subblocks
+// when the refinement grid is 4x4) in 1/8-pel units.
+static INLINE MV apply_8x8_opfl_mv_offset(MV mv, int n, int sbmv_stride, int w,
+                                          int h, const int *vx, const int *vy) {
+  if (n == 4) {
+    mv.row += ROUND_POWER_OF_TWO_SIGNED(vy[0] + vy[1] + vy[2] + vy[3],
+                                        2 + MV_REFINE_PREC_BITS - 3);
+    mv.col += ROUND_POWER_OF_TWO_SIGNED(vx[0] + vx[1] + vx[2] + vx[3],
+                                        2 + MV_REFINE_PREC_BITS - 3);
+  } else {
+    const int idx = h * sbmv_stride + w;
+    mv.row += ROUND_POWER_OF_TWO_SIGNED(vy[idx], MV_REFINE_PREC_BITS - 3);
+    mv.col += ROUND_POWER_OF_TWO_SIGNED(vx[idx], MV_REFINE_PREC_BITS - 3);
+  }
+  return mv;
+}
+
+#if CONFIG_AFFINE_REFINEMENT && DAMR_STEP2_MV
+// Evaluates the 8x8 DAMR motion vector combining the valid per-unit warp model
+// and optional step-2 translational refinement offset (or base_mv if invalid).
+static INLINE MV damr_eval_8x8_mv(const WarpedMotionParams *wm_params,
+                                  MV base_mv, int pixel_x, int pixel_y,
+                                  int has_step2, int n, int sbmv_stride, int w,
+                                  int h, const int *vx, const int *vy) {
+  if (wm_params->invalid) return base_mv;
+  WarpedMotionParams wm = *wm_params;
+  if (has_step2) {
+    int dx_wm, dy_wm;
+    if (n == 4) {
+      dx_wm = (vx[0] + vx[1] + vx[2] + vx[3]) *
+              (1 << (WARPEDMODEL_PREC_BITS - MV_REFINE_PREC_BITS - 2));
+      dy_wm = (vy[0] + vy[1] + vy[2] + vy[3]) *
+              (1 << (WARPEDMODEL_PREC_BITS - MV_REFINE_PREC_BITS - 2));
+    } else {
+      const int idx = h * sbmv_stride + w;
+      dx_wm = vx[idx] * (1 << (WARPEDMODEL_PREC_BITS - MV_REFINE_PREC_BITS));
+      dy_wm = vy[idx] * (1 << (WARPEDMODEL_PREC_BITS - MV_REFINE_PREC_BITS));
+    }
+    wm.wmmat[0] =
+        clamp(wm.wmmat[0] + dx_wm, -WARPEDMODEL_TRANS_CLAMP,
+              WARPEDMODEL_TRANS_CLAMP - (1 << WARP_PARAM_REDUCE_BITS));
+    wm.wmmat[1] =
+        clamp(wm.wmmat[1] + dy_wm, -WARPEDMODEL_TRANS_CLAMP,
+              WARPEDMODEL_TRANS_CLAMP - (1 << WARP_PARAM_REDUCE_BITS));
+  }
+  return get_sub_block_warp_mv(&wm, pixel_x, pixel_y, 8, 8);
+}
+#endif  // CONFIG_AFFINE_REFINEMENT && DAMR_STEP2_MV
+
 static INLINE int_mv get_block_mv(const MB_MODE_INFO *candidate,
                                   const SUBMB_INFO *submi, int which_mv) {
+#if CONFIG_AFFINE_REFINEMENT && DAMR_SMVP
+  if (candidate->damr_model_valid) return submi->mv[which_mv];
+#endif  // CONFIG_AFFINE_REFINEMENT && DAMR_SMVP
   return is_warp_mode(candidate->motion_mode) ? submi->mv[which_mv]
                                               : candidate->mv[which_mv];
 }

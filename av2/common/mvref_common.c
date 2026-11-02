@@ -136,41 +136,6 @@ static INLINE int is_warp_affine_block(const MACROBLOCKD *xd,
   return 0;
 }
 
-// Computes the 8x8 sub-block warp motion vector from the warp model.
-static INLINE MV get_sub_block_warp_mv(const WarpedMotionParams *warp_params,
-                                       int pixel_x, int pixel_y, int bw,
-                                       int bh) {
-  const int center_x = pixel_x + (bw >> 1);
-  const int center_y = pixel_y + (bh >> 1);
-
-  const int32_t submv_x_hp = get_subblk_offset_x_hp(
-      warp_params->wmmat, center_x, center_y, 1 << WARPEDMODEL_PREC_BITS);
-  const int32_t submv_y_hp = get_subblk_offset_y_hp(
-      warp_params->wmmat, center_x, center_y, 1 << WARPEDMODEL_PREC_BITS);
-
-  MV submv;
-  submv.col = ROUND_POWER_OF_TWO_SIGNED(submv_x_hp, WARPEDMODEL_PREC_BITS - 3);
-  submv.row = ROUND_POWER_OF_TWO_SIGNED(submv_y_hp, WARPEDMODEL_PREC_BITS - 3);
-  return submv;
-}
-
-// Adds the per-8x8 translational optical-flow MV offset (averaging 4 subblocks
-// when the refinement grid is 4x4) in 1/8-pel units.
-static INLINE MV apply_8x8_opfl_mv_offset(MV mv, int n, int sbmv_stride, int w,
-                                          int h, const int *vx, const int *vy) {
-  if (n == 4) {
-    mv.row += ROUND_POWER_OF_TWO_SIGNED(vy[0] + vy[1] + vy[2] + vy[3],
-                                        2 + MV_REFINE_PREC_BITS - 3);
-    mv.col += ROUND_POWER_OF_TWO_SIGNED(vx[0] + vx[1] + vx[2] + vx[3],
-                                        2 + MV_REFINE_PREC_BITS - 3);
-  } else {
-    const int idx = h * sbmv_stride + w;
-    mv.row += ROUND_POWER_OF_TWO_SIGNED(vy[idx], MV_REFINE_PREC_BITS - 3);
-    mv.col += ROUND_POWER_OF_TWO_SIGNED(vx[idx], MV_REFINE_PREC_BITS - 3);
-  }
-  return mv;
-}
-
 #define OPFL_MVS_CLAMPED 0
 
 static INLINE MV compute_tmvp_8x8_refined_mv(const MACROBLOCKD *xd,
@@ -193,9 +158,18 @@ static INLINE MV compute_tmvp_8x8_refined_mv(const MACROBLOCKD *xd,
 #else
     const WarpedMotionParams *wm_params = &mi->wm_params[idx];
 #endif  // CONFIG_AFFINE_REFINEMENT_SB
+#if DAMR_STEP2_MV
+    const int has_step2 =
+        damr_refine_subblock(AVM_PLANE_Y, bw, bh, mi->comp_refine_type, n, n);
+    const int *vx = xd->opfl_vxy_bufs + (idx ? N_OF_OFFSETS : 0);
+    const int *vy = xd->opfl_vxy_bufs + N_OF_OFFSETS * (2 + idx);
+    return damr_eval_8x8_mv(wm_params, mi->mv[idx].as_mv, pixel_x, pixel_y,
+                            has_step2, n, bw >> 3, w, h, vx, vy);
+#else
     (void)bh;
     return get_sub_block_warp_mv(wm_params, pixel_x, pixel_y, TMVP_MI_SIZE,
                                  TMVP_MI_SIZE);
+#endif  // DAMR_STEP2_MV
   }
 #else
   (void)mi_row;

@@ -488,6 +488,10 @@ typedef struct MB_MODE_INFO {
 #if CONFIG_AFFINE_REFINEMENT
   /*! \brief Compound refinement type */
   CompoundRefineType comp_refine_type;
+#if DAMR_SMVP
+  /*! \brief Whether DAMR exported per-8x8 MVs to submi for spatial MV pred */
+  uint8_t damr_model_valid;
+#endif  // DAMR_SMVP
 #endif  // CONFIG_AFFINE_REFINEMENT
   /*! \brief The type of intra mode used by inter-intra */
   INTERINTRA_MODE interintra_mode;

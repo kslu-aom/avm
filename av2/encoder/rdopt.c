@@ -4905,6 +4905,164 @@ static AVM_INLINE void update_predictor_search_state(
   motion_mode_cand->rate2_nocoeff = rate2_nocoeff;
 }
 
+#if CONFIG_AFFINE_REFINEMENT && DAMR_ENC_MVR
+// Refine compound NEWMV candidates on *_OPTFLOW blocks with DAMR enabled using
+// luma DAMR predictor model RD + MV bit cost.
+static void damr_refine_comp_newmv(const AV2_COMP *cpi, MACROBLOCK *x,
+                                   BLOCK_SIZE bsize, const BUFFER_SET *orig_dst,
+                                   int_mv *tmp_cur_mv, int *tmp_rate_mv,
+                                   RD_STATS *rd_stats, int *skip_build_pred) {
+  const AV2_COMMON *cm = &cpi->common;
+  MACROBLOCKD *xd = &x->e_mbd;
+  MB_MODE_INFO *mbmi = xd->mi[0];
+  if (!has_second_ref(mbmi) || mbmi->use_amvd ||
+      mbmi->comp_refine_type < COMP_AFFINE_REFINE_START ||
+      !have_newmv_in_inter_mode(mbmi->mode) ||
+      is_tip_ref_frame(mbmi->ref_frame[0])) {
+    return;
+  }
+
+  int start_ref = 0;
+  int num_mvd = 1;
+  const int joint_mvd = is_joint_mvd_coding_mode(mbmi->mode);
+  if (mbmi->mode == NEW_NEWMV_OPTFLOW) {
+    start_ref = 0;
+    num_mvd = 2;
+  } else if (mbmi->mode == NEW_NEARMV_OPTFLOW) {
+    start_ref = 0;
+    num_mvd = 1;
+  } else if (mbmi->mode == NEAR_NEWMV_OPTFLOW) {
+    start_ref = 1;
+    num_mvd = 1;
+  } else if (joint_mvd) {
+    start_ref = get_joint_mvd_base_ref_list(cm, mbmi);
+    num_mvd = 1;
+  } else {
+    return;
+  }
+
+  const MvSubpelPrecision prec = mbmi->pb_mv_precision;
+  const int is_adaptive_mvd = enable_adaptive_mvd_resolution(cm, mbmi);
+  const int step = 1 << (MV_PRECISION_ONE_EIGHTH_PEL - prec);
+  MV ref_mvs[2] = { av2_get_ref_mv(x, 0).as_mv, av2_get_ref_mv(x, 1).as_mv };
+  SUBPEL_MOTION_SEARCH_PARAMS ms_raw[2], ms_low[2];
+  for (int r = 0; r < 2; ++r) {
+    MV low_ref = ref_mvs[r];
+    if (!is_adaptive_mvd && prec < MV_PRECISION_HALF_PEL) {
+      lower_mv_precision(&low_ref, prec);
+    }
+    av2_make_default_subpel_ms_params(&ms_raw[r], cpi, x, bsize, &ref_mvs[r],
+                                      prec, 0, NULL);
+    av2_make_default_subpel_ms_params(&ms_low[r], cpi, x, bsize, &low_ref, prec,
+                                      0, NULL);
+  }
+
+  const MV init_mvs[2] = { mbmi->mv[0].as_mv, mbmi->mv[1].as_mv };
+  MV best_mvs[2] = { init_mvs[0], init_mvs[1] };
+  const int rate_without_mv = rd_stats->rate - *tmp_rate_mv;
+  int best_mv_rate = *tmp_rate_mv;
+  int rate_sum = 0;
+  int64_t dist_sum = 0;
+  int init_mv_rate = 0;
+  MV cur_pair[2] = { init_mvs[0], init_mvs[1] };
+  av2_get_model_rd(cpi, xd, x, bsize, orig_dst, cur_pair, ref_mvs, num_mvd,
+                   &rate_sum, &dist_sum, &init_mv_rate, start_ref);
+  int64_t best_model_rd =
+      RDCOST(x->rdmult, rate_without_mv + init_mv_rate + rate_sum, dist_sum);
+
+  const int steps[2] = { 8, step };
+  const int first_pass = (step < 8) ? 0 : 1;
+  static const int kDirs[4][2] = { { -1, 0 }, { 1, 0 }, { 0, -1 }, { 0, 1 } };
+  for (int pass = first_pass; pass < 2; ++pass) {
+    const int s = steps[pass];
+    const MV center_mvs[2] = { best_mvs[0], best_mvs[1] };
+    for (int d = 0; d < 4; ++d) {
+      const int dr = kDirs[d][0] * s;
+      const int dc = kDirs[d][1] * s;
+      MV cand[2] = { center_mvs[0], center_mvs[1] };
+      if (num_mvd == 2) {
+        if ((int)cand[0].row + dr < MV_LOW + 1 ||
+            (int)cand[0].row + dr > MV_UPP - 1 ||
+            (int)cand[0].col + dc < MV_LOW + 1 ||
+            (int)cand[0].col + dc > MV_UPP - 1 ||
+            (int)cand[1].row + dr < MV_LOW + 1 ||
+            (int)cand[1].row + dr > MV_UPP - 1 ||
+            (int)cand[1].col + dc < MV_LOW + 1 ||
+            (int)cand[1].col + dc > MV_UPP - 1) {
+          continue;
+        }
+        cand[0].row += dr;
+        cand[0].col += dc;
+        cand[1].row += dr;
+        cand[1].col += dc;
+        if (!av2_is_subpelmv_in_range(&ms_raw[0].mv_limits, cand[0]) ||
+            !av2_is_subpelmv_in_range(&ms_low[0].mv_limits, cand[0]) ||
+            !av2_is_subpelmv_in_range(&ms_raw[1].mv_limits, cand[1]) ||
+            !av2_is_subpelmv_in_range(&ms_low[1].mv_limits, cand[1])) {
+          continue;
+        }
+      } else {
+        if ((int)cand[start_ref].row + dr < MV_LOW + 1 ||
+            (int)cand[start_ref].row + dr > MV_UPP - 1 ||
+            (int)cand[start_ref].col + dc < MV_LOW + 1 ||
+            (int)cand[start_ref].col + dc > MV_UPP - 1) {
+          continue;
+        }
+        cand[start_ref].row += dr;
+        cand[start_ref].col += dc;
+        if (!av2_is_subpelmv_in_range(&ms_raw[start_ref].mv_limits,
+                                      cand[start_ref]) ||
+            !av2_is_subpelmv_in_range(&ms_low[start_ref].mv_limits,
+                                      cand[start_ref])) {
+          continue;
+        }
+        if (joint_mvd) {
+          MV other_mv;
+          if (!get_othermv_for_jointmv_mode(cpi, bsize, x, mbmi,
+                                            cand[start_ref], &other_mv, prec,
+                                            is_adaptive_mvd, start_ref)) {
+            continue;
+          }
+          cand[!start_ref] = other_mv;
+        }
+      }
+
+      mbmi->mv[0].as_mv = cand[0];
+      mbmi->mv[1].as_mv = cand[1];
+      if (!check_mv_precision(cm, mbmi, x) ||
+          !av2_check_newmv_joint_nonzero(cm, x)) {
+        continue;
+      }
+
+      int cand_mv_rate = 0;
+      av2_get_model_rd(cpi, xd, x, bsize, orig_dst, cand, ref_mvs, num_mvd,
+                       &rate_sum, &dist_sum, &cand_mv_rate, start_ref);
+      const int64_t cand_rd = RDCOST(
+          x->rdmult, rate_without_mv + cand_mv_rate + rate_sum, dist_sum);
+      if (cand_rd < best_model_rd) {
+        best_model_rd = cand_rd;
+        best_mvs[0] = cand[0];
+        best_mvs[1] = cand[1];
+        best_mv_rate = cand_mv_rate;
+      }
+    }
+  }
+
+  mbmi->mv[0].as_mv = best_mvs[0];
+  mbmi->mv[1].as_mv = best_mvs[1];
+  if (best_mvs[0].row != init_mvs[0].row ||
+      best_mvs[0].col != init_mvs[0].col ||
+      best_mvs[1].row != init_mvs[1].row ||
+      best_mvs[1].col != init_mvs[1].col) {
+    tmp_cur_mv[0].as_mv = best_mvs[0];
+    tmp_cur_mv[1].as_mv = best_mvs[1];
+    rd_stats->rate = rate_without_mv + best_mv_rate;
+    *tmp_rate_mv = best_mv_rate;
+    *skip_build_pred = 0;
+  }
+}
+#endif  // CONFIG_AFFINE_REFINEMENT && DAMR_ENC_MVR
+
 // Evaluates a single inter predictor candidate.
 // This function performs the core RD evaluation for a given predictor,
 // including interpolation filter search, motion mode search, and updating
@@ -5054,7 +5212,7 @@ static void evaluate_inter_predictor(AV2_COMP *const cpi,
 
   int64_t rd = INT64_MAX;
   int rs = 0;
-  int64_t ret_val;
+  int64_t ret_val = 0;
 
   // Determine the interpolation filter for this mode
   if (!is_opfl_mode)
@@ -5095,6 +5253,10 @@ static void evaluate_inter_predictor(AV2_COMP *const cpi,
     }
   }
   rd_stats->rate += compmode_interinter_cost;
+#if CONFIG_AFFINE_REFINEMENT && DAMR_ENC_MVR
+  damr_refine_comp_newmv(cpi, x, bsize, env->orig_dst, tmp_cur_mv, &tmp_rate_mv,
+                         rd_stats, &skip_build_pred);
+#endif  // CONFIG_AFFINE_REFINEMENT && DAMR_ENC_MVR
   if ((skip_build_pred != 1 && (mbmi->mode != WARPMV)) || is_comp_pred) {
     // Build this inter predictor if it has not been
     // previously built

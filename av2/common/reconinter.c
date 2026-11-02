@@ -1496,6 +1496,66 @@ void av2_calc_affine_autocorrelation_matrix_c(const int16_t *pdiff, int pstride,
   mat_a[15] += rls_alpha;
 }
 
+#if DAMR_NO_POOL
+static void finalize_unpooled_autocorr(int64_t *acc_a, const int64_t *acc_b,
+                                       int dim, int bw, int bh, int32_t *mat_a,
+                                       int32_t *vec_b) {
+  const int n_elem = dim * dim;
+  for (int s = 0; s < dim; ++s) {
+    for (int t = s + 1; t < dim; ++t) acc_a[s * dim + t] = acc_a[t * dim + s];
+  }
+  const int64_t rls_alpha = ((int64_t)bw * bh >> 4) * AFFINE_RLS_PARAM;
+  for (int s = 0; s < dim; ++s) acc_a[s * dim + s] += rls_alpha;
+
+  int64_t max_val = 0;
+  for (int k = 0; k < n_elem; ++k) max_val = AVMMAX(max_val, llabs(acc_a[k]));
+  for (int s = 0; s < dim; ++s) max_val = AVMMAX(max_val, llabs(acc_b[s]));
+  const int shift =
+      max_val > 0 ? AVMMAX(0, (1 + get_msb_signed_64(max_val)) - 29) : 0;
+  for (int k = 0; k < n_elem; ++k) {
+    mat_a[k] =
+        (int32_t)(shift > 0 ? ROUND_POWER_OF_TWO_SIGNED_64(acc_a[k], shift)
+                            : acc_a[k]);
+  }
+  for (int s = 0; s < dim; ++s) {
+    vec_b[s] =
+        (int32_t)(shift > 0 ? ROUND_POWER_OF_TWO_SIGNED_64(acc_b[s], shift)
+                            : acc_b[s]);
+    if (mat_a[s * dim + s] <= 0) mat_a[s * dim + s] = 1;
+  }
+}
+
+static void calc_affine4_autocorr_nopool(const int16_t *pdiff, int pstride,
+                                         const int16_t *gx, const int16_t *gy,
+                                         int gstride, int bw, int bh,
+                                         int32_t *mat_a, int32_t *vec_b) {
+  const int coords_bits =
+      AVMMAX(0, ((get_msb(bw) + get_msb(bh)) >> 1) - AFFINE_COORDS_OFFSET_BITS);
+  int64_t acc_a[16] = { 0 };
+  int64_t acc_b[4] = { 0 };
+  for (int i = 0; i < bh; ++i) {
+    for (int j = 0; j < bw; ++j) {
+      const int64_t x = j - bw / 2 + 1;
+      const int64_t y = i - bh / 2 + 1;
+      const int gidx = i * gstride + j;
+      const int64_t gxi = gx[gidx];
+      const int64_t gyi = gy[gidx];
+      int64_t a[4];
+      a[0] = ROUND_POWER_OF_TWO_SIGNED_64(-gxi * y + gyi * x, coords_bits);
+      a[1] = ROUND_POWER_OF_TWO_SIGNED_64(gxi * x + gyi * y, coords_bits);
+      a[2] = gxi;
+      a[3] = gyi;
+      const int64_t d = pdiff[i * pstride + j];
+      for (int s = 0; s < 4; ++s) {
+        for (int t = 0; t <= s; ++t) acc_a[s * 4 + t] += a[s] * a[t];
+        acc_b[s] += a[s] * d;
+      }
+    }
+  }
+  finalize_unpooled_autocorr(acc_a, acc_b, 4, bw, bh, mat_a, vec_b);
+}
+#endif  // DAMR_NO_POOL
+
 #if DAMR_EXP_6P
 // Full 6-parameter affine model v = J x + t, with J = [a b; c e], solved per
 // affine unit of size >= DAMR_6P_MIN.
@@ -1504,6 +1564,39 @@ typedef struct {
   int tran_x, tran_y;
 } Affine6Params;
 
+#if DAMR_NO_POOL
+static void calc_affine6_autocorr_nopool(const int16_t *pdiff, int pstride,
+                                         const int16_t *gx, const int16_t *gy,
+                                         int gstride, int bw, int bh,
+                                         int32_t *mat_a, int32_t *vec_b) {
+  const int coords_bits =
+      AVMMAX(0, ((get_msb(bw) + get_msb(bh)) >> 1) - AFFINE_COORDS_OFFSET_BITS);
+  int64_t acc_a[36] = { 0 };
+  int64_t acc_b[6] = { 0 };
+  for (int i = 0; i < bh; ++i) {
+    for (int j = 0; j < bw; ++j) {
+      const int64_t x = j - bw / 2 + 1;
+      const int64_t y = i - bh / 2 + 1;
+      const int gidx = i * gstride + j;
+      const int64_t gxi = gx[gidx];
+      const int64_t gyi = gy[gidx];
+      int64_t a[6];
+      a[0] = ROUND_POWER_OF_TWO_SIGNED_64(gxi * x, coords_bits);
+      a[1] = ROUND_POWER_OF_TWO_SIGNED_64(gxi * y, coords_bits);
+      a[2] = ROUND_POWER_OF_TWO_SIGNED_64(gyi * x, coords_bits);
+      a[3] = ROUND_POWER_OF_TWO_SIGNED_64(gyi * y, coords_bits);
+      a[4] = gxi;
+      a[5] = gyi;
+      const int64_t d = pdiff[i * pstride + j];
+      for (int s = 0; s < 6; ++s) {
+        for (int t = 0; t <= s; ++t) acc_a[s * 6 + t] += a[s] * a[t];
+        acc_b[s] += a[s] * d;
+      }
+    }
+  }
+  finalize_unpooled_autocorr(acc_a, acc_b, 6, bw, bh, mat_a, vec_b);
+}
+#else
 static void calc_affine6_autocorrelation(const int16_t *pdiff, int pstride,
                                          const int16_t *gx, const int16_t *gy,
                                          int gstride, int bw, int bh,
@@ -1551,6 +1644,7 @@ static void calc_affine6_autocorrelation(const int16_t *pdiff, int pstride,
   const int rls_alpha = (bw * bh >> 4) * AFFINE_RLS_PARAM;
   for (int s = 0; s < 6; ++s) mat_a[s * 6 + s] += rls_alpha;
 }
+#endif  // DAMR_NO_POOL
 
 static int opfl_affine6_refinement(const int16_t *pdiff, int pstride,
                                    const int16_t *gx, const int16_t *gy,
@@ -1559,8 +1653,13 @@ static int opfl_affine6_refinement(const int16_t *pdiff, int pstride,
   int32_t mat_a[36] = { 0 };
   int32_t vec_b[6] = { 0 };
   int64_t mat[36], vec[6];
+#if DAMR_NO_POOL
+  calc_affine6_autocorr_nopool(pdiff, pstride, gx, gy, gstride, bw, bh, mat_a,
+                               vec_b);
+#else
   calc_affine6_autocorrelation(pdiff, pstride, gx, gy, gstride, bw, bh, mat_a,
                                vec_b);
+#endif  // DAMR_NO_POOL
   const int coords_bits =
       AVMMAX(0, ((get_msb(bw) + get_msb(bh)) >> 1) - AFFINE_COORDS_OFFSET_BITS);
   int prec_bits[6];
@@ -1621,8 +1720,13 @@ int av2_opfl_affine_refinement(const int16_t *pdiff, int pstride,
   // This accumulation needs to take into account the offsets relative to the
   // subblock center. Previous mat_a and vec_b are relative to the centers of
   // the previous blocks
+#if DAMR_NO_POOL
+  calc_affine4_autocorr_nopool(pdiff, pstride, gx, gy, gstride, bw, bh, mat_a,
+                               vec_b);
+#else
   av2_calc_affine_autocorrelation_matrix(pdiff, pstride, gx, gy, gstride, bw,
                                          bh, mat_a, vec_b);
+#endif  // DAMR_NO_POOL
 
   const int coords_bits =
       AVMMAX(0, ((get_msb(bw) + get_msb(bh)) >> 1) - AFFINE_COORDS_OFFSET_BITS);
@@ -1781,14 +1885,17 @@ static void process_affine_refinement_subblock(
     int bh, int d0, int d1, int mi_x, int mi_y, WarpedMotionParams *wms,
     const MV *const src_mv, const struct scale_factors *sf[2],
     int grad_prec_bits) {
+#if !DAMR_NO_POOL
   av2_avg_pooling_pdiff_gradients(pdiff, pstride, gx, gy, gstride, bw, bh,
                                   AFFINE_AVG_MAX_SIZE);
+#endif  // !DAMR_NO_POOL
 
 #if DAMR_EXP_6P
   if (bw >= DAMR_6P_MIN && bh >= DAMR_6P_MIN) {
     Affine6Params p6 = { { 0, 0, 0, 0 }, 0, 0 };
-    if (!opfl_affine6_refinement(pdiff, pstride, gx, gy, gstride, bw, bh,
-                                 grad_prec_bits, &p6)) {
+    const int err6 = opfl_affine6_refinement(pdiff, pstride, gx, gy, gstride,
+                                             bw, bh, grad_prec_bits, &p6);
+    if (!err6 || DAMR_WARP_ALIGN) {
       get_ref_affine6_params(bw, bh, mi_x, mi_y, &p6, wms, d0, &src_mv[0],
                              sf[0]);
       get_ref_affine6_params(bw, bh, mi_x, mi_y, &p6, wms + 1, d1, &src_mv[1],
@@ -1799,10 +1906,11 @@ static void process_affine_refinement_subblock(
 #endif  // DAMR_EXP_6P
   AffineModelParams affine_params = default_affine_params;
   // In some rare cases, the determinant in the solver may be zero or
-  // negative due to numerical errors. In this case we still set invalid=0,
-  // but the warped parameters remain the default values.
-  if (!av2_opfl_affine_refinement(pdiff, pstride, gx, gy, gstride, bw, bh,
-                                  grad_prec_bits, &affine_params)) {
+  // negative due to numerical errors. Under DAMR_WARP_ALIGN, still populate
+  // wms from default_affine_params so the base translational MV is preserved.
+  const int err4 = av2_opfl_affine_refinement(
+      pdiff, pstride, gx, gy, gstride, bw, bh, grad_prec_bits, &affine_params);
+  if (!err4 || DAMR_WARP_ALIGN) {
     get_ref_affine_params(bw, bh, mi_x, mi_y, &affine_params, wms, d0,
                           &src_mv[0], sf[0]);
     get_ref_affine_params(bw, bh, mi_x, mi_y, &affine_params, wms + 1, d1,
@@ -1839,15 +1947,19 @@ void av2_opfl_affine_refinement_mxn(int16_t *pdiff, int pstride, int16_t *gx,
 
 // Update predicted blocks (P0 & P1) and their gradients based on the affine
 // model derived from the first DAMR step
-void update_pred_grad_with_affine_model(
+static void update_pred_grad_with_affine_model(
     MACROBLOCKD *xd, int plane, int bw, int bh, WarpedMotionParams *wms,
     int mi_x, int mi_y, int16_t *tmp0, int16_t *tmp1, int16_t *gx0,
     int16_t *gy0, const int d0, const int d1, int *grad_prec_bits,
-    const AV2_COMMON *cm, MB_MODE_INFO *mi, int pu_width, int pu_height) {
+    const AV2_COMMON *cm, MB_MODE_INFO *mi, const struct scale_factors *sf[2],
+    int pu_width, int pu_height) {
   DECLARE_ALIGNED(32, uint16_t, dst_warped[2 * MAX_SB_SIZE * MAX_SB_SIZE]);
   struct macroblockd_plane *const pd = &xd->plane[plane];
   ConvolveParams conv_params =
       get_conv_params_no_round(0, plane, NULL, 0, 0, xd->bd);
+#if !DAMR_WARP_ALIGN
+  (void)sf;
+#endif  // !DAMR_WARP_ALIGN
 
   for (int ref = 0; ref < 2; ref++) {
     struct buf_2d *const pre_buf = &pd->pre[ref];
@@ -1857,18 +1969,35 @@ void update_pred_grad_with_affine_model(
     int nb = 0;
     for (int i = 0; i < bh; i += sub_bh) {
       for (int j = 0; j < bw; j += sub_bw) {
+        WarpedMotionParams *this_wm = wms + 2 * nb + ref;
         ReferenceArea ref_area_damr_intermediate;
         av2_get_reference_area_with_padding_single(
             cm, xd, plane, mi, mi->mv[ref].as_mv, sub_bw, sub_bh, mi_x + j,
             mi_y + i, &ref_area_damr_intermediate.pad_block, pu_width,
             pu_height, ref, 0);
         ref_area_damr_intermediate.paded_ref_buf_stride = REF_BUFFER_WIDTH;
+#if DAMR_WARP_ALIGN
+        PadBlock warp_bd_box;
+        int use_warp_bd_damr = 0;
+        if (!this_wm->use_affine_filter || sub_bw < 8 || sub_bh < 8) {
+          av2_get_reference_area_with_padding_single(
+              cm, xd, plane, mi, mi->mv[ref].as_mv, sub_bw, sub_bh, mi_x + j,
+              mi_y + i, &warp_bd_box, pu_width, pu_height, ref, 1);
+          use_warp_bd_damr = 1;
+        }
+        av2_warp_plane(
+            this_wm, xd->bd, pre_buf->buf0, pre_buf->width, pre_buf->height,
+            pre_buf->stride, &dst_warped[ref * bw * bh + i * bw + j], mi_x + j,
+            mi_y + i, sub_bw, sub_bh, bw, pd->subsampling_x, pd->subsampling_y,
+            &conv_params, sf[ref], 1, &ref_area_damr_intermediate, 0, NULL,
+            use_warp_bd_damr, use_warp_bd_damr ? &warp_bd_box : NULL);
+#else
         av2_warp_plane_bilinear(
-            wms + 2 * nb + ref, xd->bd, pre_buf->buf0, pre_buf->width,
-            pre_buf->height, pre_buf->stride,
-            &dst_warped[ref * bw * bh + i * bw + j], mi_x + j, mi_y + i, sub_bw,
-            sub_bh, bw, pd->subsampling_x, pd->subsampling_y, &conv_params,
-            &ref_area_damr_intermediate.pad_block);
+            this_wm, xd->bd, pre_buf->buf0, pre_buf->width, pre_buf->height,
+            pre_buf->stride, &dst_warped[ref * bw * bh + i * bw + j], mi_x + j,
+            mi_y + i, sub_bw, sub_bh, bw, pd->subsampling_x, pd->subsampling_y,
+            &conv_params, &ref_area_damr_intermediate.pad_block);
+#endif  // DAMR_WARP_ALIGN
         nb++;
       }
     }
@@ -2038,7 +2167,7 @@ void av2_get_optflow_based_mv(const AV2_COMMON *cm, MACROBLOCKD *xd, int plane,
     if (damr_refine_subblock(plane, bw, bh, mbmi->comp_refine_type, n, n)) {
       update_pred_grad_with_affine_model(
           xd, plane, bw, bh, wms, mi_x, mi_y, tmp0, tmp1, gx0, gy0, d0, d1,
-          &grad_prec_bits, cm, mbmi, pu_width, pu_height);
+          &grad_prec_bits, cm, mbmi, sf, pu_width, pu_height);
       // Subblock-wise translational refinement on the affine-warped predictors.
       n_blocks = av2_opfl_mv_refinement_nxn(
           tmp1, bw, gx0, gy0, bw, bw, bh, n, d0, d1, grad_prec_bits,
@@ -4269,6 +4398,69 @@ static void build_inter_predictors_8x8_and_bigger_refinemv(
   }
 }
 
+#if CONFIG_AFFINE_REFINEMENT && DAMR_SMVP
+// Export per-8x8 DAMR motion vectors into submi for spatial MV prediction of
+// subsequent blocks.
+static void damr_export_motion(const AV2_COMMON *cm, MACROBLOCKD *xd,
+                               const MB_MODE_INFO *mi, int bw, int bh, int mi_x,
+                               int mi_y, const WarpedMotionParams *wms,
+                               int use_affine_opfl, int n, const int *vx0,
+                               const int *vy0, const int *vx1, const int *vy1) {
+  const int unit_w = AVMMIN(AFFINE_MAX_UNIT, bw);
+  const int unit_h = AVMMIN(AFFINE_MAX_UNIT, bh);
+  const int wms_stride = bw / unit_w;
+  const int mi_row = mi_y >> MI_SIZE_LOG2, mi_col = mi_x >> MI_SIZE_LOG2;
+  const int mi_stride = cm->mi_params.mi_stride;
+  const int x_mis = AVMMIN(bw >> MI_SIZE_LOG2, cm->mi_params.mi_cols - mi_col);
+  const int y_mis = AVMMIN(bh >> MI_SIZE_LOG2, cm->mi_params.mi_rows - mi_row);
+#if DAMR_STEP2_MV
+  const int has_step2 =
+      use_affine_opfl &&
+      damr_refine_subblock(0, bw, bh, mi->comp_refine_type, n, n);
+  const int sbmv_stride = bw >> 3;
+#else
+  (void)use_affine_opfl;
+  (void)n;
+  (void)vx0;
+  (void)vy0;
+  (void)vx1;
+  (void)vy1;
+#endif  // DAMR_STEP2_MV
+  for (int my = 0; my < y_mis; my += 2) {
+    for (int mx = 0; mx < x_mis; mx += 2) {
+      const int px = mx * MI_SIZE, py = my * MI_SIZE;
+      const int u = (py / unit_h) * wms_stride + px / unit_w;
+      for (int ref = 0; ref < 2; ++ref) {
+        const WarpedMotionParams *wm = &wms[2 * u + ref];
+        MV mv = mi->mv[ref].as_mv;
+#if DAMR_STEP2_MV
+        const int *vx = ref ? vx1 : vx0;
+        const int *vy = ref ? vy1 : vy0;
+        if (use_affine_opfl) {
+          mv = damr_eval_8x8_mv(wm, mv, mi_x + px, mi_y + py, has_step2, n,
+                                sbmv_stride, mx >> 1, my >> 1, vx, vy);
+        } else if (mi->comp_refine_type == COMP_REFINE_SUBBLK2P) {
+          mv = apply_8x8_opfl_mv_offset(mv, n, sbmv_stride, mx >> 1, my >> 1,
+                                        vx, vy);
+        }
+        mv.row = clamp(mv.row, MV_LOW + 1, MV_UPP - 1);
+        mv.col = clamp(mv.col, MV_LOW + 1, MV_UPP - 1);
+#else
+        if (!wm->invalid) {
+          mv = get_sub_block_warp_mv(wm, mi_x + px, mi_y + py, 8, 8);
+          mv.row = clamp(mv.row, MV_LOW + 1, MV_UPP - 1);
+          mv.col = clamp(mv.col, MV_LOW + 1, MV_UPP - 1);
+        }
+#endif  // DAMR_STEP2_MV
+        for (int dy = 0; dy < 2 && my + dy < y_mis; ++dy)
+          for (int dx = 0; dx < 2 && mx + dx < x_mis; ++dx)
+            xd->submi[(my + dy) * mi_stride + mx + dx]->mv[ref].as_mv = mv;
+      }
+    }
+  }
+}
+#endif  // CONFIG_AFFINE_REFINEMENT && DAMR_SMVP
+
 static void build_inter_predictors_8x8_and_bigger(
     const AV2_COMMON *cm, MACROBLOCKD *xd, int plane, MB_MODE_INFO *mi,
     const BUFFER_SET *dst_orig, int build_for_decode, int bw, int bh, int mi_x,
@@ -4536,6 +4728,14 @@ static void build_inter_predictors_8x8_and_bigger(
                                use_4x4, best_mv_ref, pu_width, pu_height);
 #if CONFIG_AFFINE_REFINEMENT
       xd->use_affine_opfl = use_affine_opfl;
+#if DAMR_SMVP
+      if ((use_affine_opfl || DAMR_STEP2_MV) && !tip_ref_frame &&
+          xd->tree_type != CHROMA_PART && !build_for_refine_mv_only) {
+        mi->damr_model_valid = 1;
+        damr_export_motion(cm, xd, mi, bw, bh, mi_x, mi_y, wms, use_affine_opfl,
+                           n, vx0, vy0, vx1, vy1);
+      }
+#endif  // DAMR_SMVP
 #if CONFIG_AFFINE_REFINEMENT_SB
       memcpy(xd->wm_params_sb, wms, 2 * NUM_AFFINE_PARAMS * sizeof(wms[0]));
 #else
@@ -4856,8 +5056,14 @@ void av2_build_inter_predictors(const AV2_COMMON *cm, MACROBLOCKD *xd,
                                 int build_for_decode, int bw, int bh, int mi_x,
                                 int mi_y, uint16_t **mc_buf,
                                 CalcSubpelParamsFunc calc_subpel_params_func) {
-  if (plane == AVM_PLANE_Y)
+  if (plane == AVM_PLANE_Y) {
     memset(xd->mv_refined, 0, 2 * N_OF_OFFSETS * sizeof(int_mv));
+#if CONFIG_AFFINE_REFINEMENT && DAMR_SMVP
+    if (xd->tree_type != CHROMA_PART && !build_for_refine_mv_only) {
+      mi->damr_model_valid = 0;
+    }
+#endif  // CONFIG_AFFINE_REFINEMENT && DAMR_SMVP
+  }
   // just for debugging purpose
   // Can be removed later on
   if (mi->mode == WARPMV) {
