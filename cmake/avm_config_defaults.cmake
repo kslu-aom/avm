@@ -148,7 +148,7 @@ set_avm_config_var(CONFIG_AFFINE_REFINEMENT 1
                    "Decoder side affine motion refinement.")
 set_avm_config_var(CONFIG_AFFINE_REFINEMENT_SB 1
                    "Subblock based affine refinement")
-set_avm_config_var(AFFINE_MAX_UNIT_LOG2 5
+set_avm_config_var(AFFINE_MAX_UNIT_LOG2 6
                    "Log2 max unit size for DAMR affine refinement (5=32, 6=64).")
 set_avm_config_var(DAMR_SMVP 0
                    "Export DAMR 8x8 sub-block MVs to spatial MV prediction.")
